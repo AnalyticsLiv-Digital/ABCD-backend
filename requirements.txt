@@ -1,0 +1,19 @@
+# ABCD Detector SaaS – Backend (Phase 1 + 2)
+# Python 3.11+
+
+fastapi>=0.109.0
+uvicorn[standard]>=0.27.0
+pydantic>=2.5.0
+python-dotenv>=1.0.0
+pymongo>=4.7.0
+passlib[bcrypt]>=1.7.4
+python-jose[cryptography]>=3.3.0
+
+# Phase 2 – ABCD detector (GCP / Gemini / Video Intelligence)
+google-cloud-aiplatform>=1.38.0
+google-cloud-videointelligence>=2.14.0
+google-cloud-storage>=2.14.0
+moviepy>=1.0.3,<2.0.0
+google-api-python-client>=2.100.0
+pandas>=2.0.0
+pyarrow>=14.0.0
