@@ -103,6 +103,16 @@ def _build_job_response(doc: Dict[str, Any]) -> JobResponse:
         error=doc.get("error"),
         result=result_obj,
         video_identifier=doc.get("video_identifier"),
+        brand_name=doc.get("brand_name"),
+        brand_variations=doc.get("brand_variations"),
+        products=doc.get("products"),
+        product_categories=doc.get("product_categories"),
+        call_to_actions=doc.get("call_to_actions"),
+        campaign_name=doc.get("campaign_name"),
+        campaign_tags=doc.get("campaign_tags"),
+        creative_format=doc.get("creative_format"),
+        objective=doc.get("objective"),
+        advanced=doc.get("advanced"),
     )
 
 

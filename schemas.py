@@ -109,6 +109,17 @@ class FeatureResult(BaseModel):
     details: Optional[str] = None
 
 
+class AbcdPillarScore(BaseModel):
+    """Aggregated score for a single ABCD pillar (A/B/C/D)."""
+
+    letter: Literal["A", "B", "C", "D"]
+    name: str  # Human-friendly pillar name: Attract, Brand, Connect, Direct
+    score_pct: float
+    passed: int
+    total: int
+    result: str  # "Excellent" | "Might Improve" | "Needs Review"
+
+
 class JobResultPayload(BaseModel):
     """Result payload when job is completed. Mirrors ABCD VideoAssessment."""
 
@@ -124,6 +135,10 @@ class JobResultPayload(BaseModel):
     )
     long_form_abcd: List[FeatureResult] = Field(default_factory=list)
     shorts: List[FeatureResult] = Field(default_factory=list)
+    abcd_pillar_scores: List[AbcdPillarScore] = Field(
+        default_factory=list,
+        description="Per-pillar ABCD scores (A/B/C/D) derived from long-form features.",
+    )
     result_source: Optional[Literal["mock", "abcd"]] = Field(
         default="abcd",
         description="'mock' = placeholder data; 'abcd' = real ABCD detector run",
@@ -140,6 +155,17 @@ class JobResponse(BaseModel):
     error: Optional[str] = None
     result: Optional[JobResultPayload] = None
     video_identifier: Optional[str] = None  # youtube_url or video_url for display
+    # Echoed input metadata so the frontend can show what was analyzed.
+    brand_name: Optional[str] = None
+    brand_variations: Optional[List[str]] = None
+    products: Optional[List[str]] = None
+    product_categories: Optional[List[str]] = None
+    call_to_actions: Optional[List[str]] = None
+    campaign_name: Optional[str] = None
+    campaign_tags: Optional[List[str]] = None
+    creative_format: Optional[str] = None
+    objective: Optional[str] = None
+    advanced: Optional[AdvancedOptions] = None
 
 
 class CreateJobResponse(BaseModel):

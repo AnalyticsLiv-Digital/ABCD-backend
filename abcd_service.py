@@ -9,7 +9,7 @@ import time
 from typing import Any, Dict, List, Optional
 
 from config import settings
-from schemas import FeatureResult, JobResultPayload
+from schemas import AbcdPillarScore, FeatureResult, JobResultPayload
 
 logger = logging.getLogger(__name__)
 
@@ -320,6 +320,57 @@ def run_abcd_analysis(
     score_pct = (passed * 100.0 / total) if total else 0.0
     overall_result = _overall_result_from_score(score_pct)
 
+    # Per-pillar ABCD scores (A/B/C/D) based on long-form features only.
+    _ensure_abcd_path()
+    from models import VideoFeatureSubCategory  # type: ignore
+
+    subcat_to_letter = {
+        "ATTRACT": ("A", "Attract"),
+        "BRAND": ("B", "Brand"),
+        "CONNECT": ("C", "Connect"),
+        "DIRECT": ("D", "Direct"),
+    }
+    pillar_counts: Dict[str, Dict[str, Any]] = {
+        "A": {"name": "Attract", "passed": 0, "total": 0},
+        "B": {"name": "Brand", "passed": 0, "total": 0},
+        "C": {"name": "Connect", "passed": 0, "total": 0},
+        "D": {"name": "Direct", "passed": 0, "total": 0},
+    }
+
+    for fe in assessment.long_form_abcd_evaluated_features:
+        feature = getattr(fe, "feature", None)
+        subcat = getattr(feature, "sub_category", None)
+        if not subcat:
+            continue
+        key_name = None
+        if isinstance(subcat, VideoFeatureSubCategory):
+            key_name = subcat.name
+        else:
+            key_name = str(subcat)
+        mapping = subcat_to_letter.get(key_name)
+        if not mapping:
+            continue
+        letter, _ = mapping
+        pillar_counts[letter]["total"] += 1
+        if getattr(fe, "detected", False):
+            pillar_counts[letter]["passed"] += 1
+
+    pillar_scores: List[AbcdPillarScore] = []
+    for letter, info in pillar_counts.items():
+        if not info["total"]:
+            continue
+        pillar_pct = info["passed"] * 100.0 / info["total"]
+        pillar_scores.append(
+            AbcdPillarScore(
+                letter=letter,
+                name=info["name"],
+                score_pct=round(pillar_pct, 2),
+                passed=info["passed"],
+                total=info["total"],
+                result=_overall_result_from_score(pillar_pct),
+            )
+        )
+
     duration_sec = time.monotonic() - start
     logger.info(
         "ABCD run complete",
@@ -341,6 +392,7 @@ def run_abcd_analysis(
         result_source="abcd",
         overall_score_pct=round(score_pct, 2),
         overall_result=overall_result,
+        abcd_pillar_scores=pillar_scores,
         long_form_abcd=long_form,
         shorts=shorts,
     )
