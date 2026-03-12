@@ -45,7 +45,14 @@ from google.cloud import storage
 
 router = APIRouter(prefix="/jobs", tags=["jobs"])
 _log = logging.getLogger(__name__)
-_storage_client = storage.Client()
+_storage_client = None
+
+
+def _get_storage_client():
+    global _storage_client
+    if _storage_client is None:
+        _storage_client = storage.Client()
+    return _storage_client
 
 
 def _extract_abcd_metadata_from_doc(doc: Dict[str, Any]) -> Dict[str, Any]:
@@ -140,7 +147,7 @@ def _upload_video_to_gcs(job_id: str, user_email: str, upload_file: UploadFile) 
     """Upload the given video file to GCS and return its gs:// URI."""
     if not settings.GCS_BUCKET:
         raise RuntimeError("GCS_BUCKET is not configured")
-    bucket = _storage_client.bucket(settings.GCS_BUCKET)
+    bucket = _get_storage_client().bucket(settings.GCS_BUCKET)
     filename = upload_file.filename or "video.mp4"
     safe_email = user_email.replace("@", "_at_").replace("/", "_")
     blob_name = f"uploads/{safe_email}/{job_id}/{filename}"
