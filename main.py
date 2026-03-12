@@ -31,12 +31,17 @@ async def lifespan(app: FastAPI):
         logger.warning(
             "USE_REAL_ABCD is true but GCP_PROJECT_ID is empty; real ABCD will be disabled."
         )
-    # MongoDB connectivity check (non-blocking – don't stall startup)
+    # MongoDB connectivity check – run in thread so we don't block the event loop
+    import asyncio
     try:
-        # cheap call to verify connection
-        jobs_collection.estimated_document_count()
-    except Exception as exc:  # pragma: no cover - defensive
-        logger.error("MongoDB connectivity check failed: %s", exc)
+        await asyncio.wait_for(
+            asyncio.get_event_loop().run_in_executor(
+                None, jobs_collection.estimated_document_count
+            ),
+            timeout=5.0,
+        )
+    except Exception as exc:
+        logger.warning("MongoDB connectivity check failed (non-fatal): %s", exc)
     yield
 
 
