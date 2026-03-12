@@ -31,7 +31,7 @@ async def lifespan(app: FastAPI):
         logger.warning(
             "USE_REAL_ABCD is true but GCP_PROJECT_ID is empty; real ABCD will be disabled."
         )
-    # MongoDB connectivity check
+    # MongoDB connectivity check (non-blocking – don't stall startup)
     try:
         # cheap call to verify connection
         jobs_collection.estimated_document_count()

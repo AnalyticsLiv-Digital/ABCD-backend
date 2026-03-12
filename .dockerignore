@@ -1,0 +1,40 @@
+# Virtual environment - never copy Windows-built venv into Linux container
+.venv/
+venv/
+env/
+
+# Environment files with secrets - set these as Cloud Run secrets/env vars instead
+.env
+.env.*
+!.env.example
+
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Docs / local extras
+docs/
+*.md
+abcd_original/
