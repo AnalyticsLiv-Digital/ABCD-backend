@@ -22,7 +22,7 @@ def _get_storage_client():
 
 
 def _bucket_name() -> str:
-    return settings.GCS_IMAGES_BUCKET or settings.GCS_BUCKET
+    return settings.GCS_BUCKET or settings.GCS_BUCKET
 
 
 def upload_bytes_to_gcs(data: bytes, blob_name: str, content_type: str = "image/png") -> str:
@@ -34,7 +34,7 @@ def upload_bytes_to_gcs(data: bytes, blob_name: str, content_type: str = "image/
     bucket = _bucket_name()
     if not bucket:
         raise RuntimeError(
-            "GCS bucket not configured. Set GCS_IMAGES_BUCKET (or GCS_BUCKET) in .env"
+            "GCS bucket not configured. Set GCS_BUCKET (or GCS_BUCKET) in .env"
         )
     client = _get_storage_client()
     b = client.bucket(bucket)
