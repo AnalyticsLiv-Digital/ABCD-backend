@@ -60,6 +60,8 @@ class Settings:
     # Creative Studio – image enhancement via n8n
     # The n8n webhook is called server-side (background thread), so no CORS or timeout issues.
     N8N_IMAGE_WEBHOOK_URL: str = os.getenv("N8N_IMAGE_WEBHOOK_URL", "https://n8n.analyticsliv.com/webhook/image-agent")
+    # Secret sent to n8n and echoed back in the callback so we can verify origin.
+    N8N_CALLBACK_SECRET: str = os.getenv("N8N_CALLBACK_SECRET", "change-me-callback-secret")
 
 
 settings = Settings()

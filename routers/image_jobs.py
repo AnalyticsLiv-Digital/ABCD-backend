@@ -1,22 +1,22 @@
 """
 Creative Studio – Image Enhancement Jobs API
 
-The n8n webhook is called synchronously from a background thread (long timeout),
-so the browser never directly touches n8n.  This fixes both CORS and 504 issues
-without requiring any changes to the n8n workflow.
-
-Flow:
-  1. POST /image-jobs      → create DB record, schedule background work, return job_id IN < 200ms
-  2. Background thread     → upload original to GCS, call n8n (5 min timeout), store results
-  3. GET  /image-jobs/{id} → poll until status = completed | failed
-  4. GET  /image-jobs      → list user's history
+Async callback pattern (no 504):
+  1. POST /image-jobs         → DB record, fire background task, return job_id in < 200ms
+  2. Background task          → upload original to GCS, POST to n8n with callback_url (30s ack timeout)
+  3. n8n workflow             → "Respond to Webhook" immediately, does processing, POSTs results back
+  4. POST /image-jobs/{id}/complete → receives results, uploads to GCS, marks completed
+  5. GET  /image-jobs/{id}    → poll until status = completed | failed
+  6. GET  /image-jobs         → list user's history
 """
 import base64
+import hashlib
+import hmac
 import io
 import logging
 from typing import List, Optional
 
-from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, UploadFile
 
 from config import settings
 from gcs_utils import upload_bytes_to_gcs
@@ -44,10 +44,8 @@ def _check_access(user: dict) -> None:
     """
     roles = user.get("roles") or []
     is_admin = "admin" in roles
-    # Admins always have full access
     if is_admin:
         return
-    # For non-admins, check the explicit services list
     services = user.get("allowed_services") or ["abcd_analyzer"]
     if "creative_studio" not in services:
         raise HTTPException(
@@ -78,19 +76,18 @@ def _process(
     content_type: str,
     filename: str,
     prompt: str,
+    callback_url: str,
 ) -> None:
     """
-    Runs entirely in FastAPI's thread pool — the HTTP response has already
-    been sent to the browser before this function starts.
+    Runs in FastAPI's thread pool — response has already been sent.
 
     Steps:
-      1. Upload original image to GCS (for history thumbnails)
-      2. POST to n8n with multipart form — same format the browser used to send
-      3. Parse n8n response (binary image or JSON envelope)
-      4. Upload result(s) to GCS
-      5. Mark job completed / failed in MongoDB
+      1. Upload original image to GCS
+      2. POST to n8n with multipart form including callback_url + secret (30s ack timeout)
+         n8n must respond immediately (via "Respond to Webhook" node) — actual processing
+         happens asynchronously inside n8n, which then POSTs results to callback_url.
     """
-    # 1. Upload original to GCS (non-blocking from browser's perspective)
+    # 1. Upload original to GCS
     ext = (content_type.split("/")[-1].split(";")[0] or "jpg")[:10]
     try:
         original_url = upload_bytes_to_gcs(
@@ -100,7 +97,7 @@ def _process(
     except Exception as exc:
         _log.warning("Original GCS upload failed for job %s (non-fatal): %s", job_id, exc)
 
-    # 2. Call n8n
+    # 2. Call n8n (expect immediate ack, not final result)
     if not settings.N8N_IMAGE_WEBHOOK_URL:
         _log.warning("N8N_IMAGE_WEBHOOK_URL not configured; job %s failed", job_id)
         set_image_job_failed(job_id, "Image processing service not configured on server.")
@@ -109,89 +106,30 @@ def _process(
     try:
         import requests as _req
 
-        _log.info("Sending job %s to n8n (timeout=300s)…", job_id)
+        _log.info("Sending job %s to n8n (ack timeout=30s)…", job_id)
+        form_data = {
+            "job_id":          job_id,
+            "callback_url":    callback_url,
+            "callback_secret": settings.N8N_CALLBACK_SECRET,
+        }
+        if prompt:
+            form_data["prompt"] = prompt
+
         resp = _req.post(
             settings.N8N_IMAGE_WEBHOOK_URL,
             files={"image": (filename, io.BytesIO(image_data), content_type)},
-            data={"prompt": prompt} if prompt else {},
-            timeout=300,   # 5-minute ceiling
+            data=form_data,
+            timeout=30,   # only waiting for ack, NOT the final result
         )
 
-        if not resp.ok:
+        if resp.ok:
+            _log.info("n8n ack received for job %s (status %s) — processing async", job_id, resp.status_code)
+        else:
+            _log.error("n8n returned HTTP %s for job %s", resp.status_code, job_id)
             set_image_job_failed(job_id, f"Processing service returned HTTP {resp.status_code}")
-            return
-
-        # 3. Parse response — mirrors original browser-side logic
-        resp_ct = resp.headers.get("content-type", "")
-        result_pairs: List[tuple] = []   # [(bytes, content_type_str), …]
-
-        if resp_ct.startswith("image/"):
-            ct = resp_ct.split(";")[0].strip()
-            result_pairs.append((resp.content, ct))
-        else:
-            try:
-                body = resp.json()
-            except Exception:
-                set_image_job_failed(job_id, "Unrecognised response from processing service")
-                return
-
-            images_list = body.get("images")
-            if images_list and isinstance(images_list, list):
-                # Multi-image JSON: [{"data": "base64", "content_type": "image/png"}, …]
-                for item in images_list:
-                    raw_b64 = item.get("data", "")
-                    item_ct  = item.get("content_type", "image/png")
-                    try:
-                        result_pairs.append((base64.b64decode(raw_b64), item_ct))
-                    except Exception:
-                        pass
-            else:
-                # Single-image JSON: image / data / result / output key
-                raw = (
-                    body.get("image")
-                    or body.get("data")
-                    or body.get("result")
-                    or body.get("output")
-                )
-                if raw is None:
-                    set_image_job_failed(job_id, "No image found in processing service response")
-                    return
-
-                if isinstance(raw, str) and raw.startswith("http"):
-                    img_resp = _req.get(raw, timeout=60)
-                    dl_ct = img_resp.headers.get("content-type", "image/png").split(";")[0].strip()
-                    result_pairs.append((img_resp.content, dl_ct))
-                elif isinstance(raw, str):
-                    cleaned = raw.split(",", 1)[-1] if "," in raw else raw
-                    result_pairs.append((base64.b64decode(cleaned), "image/png"))
-                else:
-                    set_image_job_failed(job_id, "Unexpected image format in response")
-                    return
-
-        if not result_pairs:
-            set_image_job_failed(job_id, "Processing service returned no usable images")
-            return
-
-        # 4. Upload results to GCS
-        result_urls: List[str] = []
-        for i, (img_bytes, img_ct) in enumerate(result_pairs):
-            r_ext = (img_ct.split("/")[-1].split(";")[0] or "png")[:10]
-            blob  = f"image_jobs/{job_id}/result_{i}.{r_ext}"
-            try:
-                url = upload_bytes_to_gcs(img_bytes, blob, img_ct)
-                result_urls.append(url)
-            except Exception as exc:
-                _log.error("GCS upload failed for result %d of job %s: %s", i, job_id, exc)
-
-        # 5. Update status
-        if result_urls:
-            set_image_job_completed(job_id, result_urls)
-            _log.info("Job %s completed — %d result(s)", job_id, len(result_urls))
-        else:
-            set_image_job_failed(job_id, "Failed to store result images to cloud storage")
 
     except Exception as exc:
-        _log.error("Unexpected error in job %s: %s", job_id, exc)
+        _log.error("Failed to reach n8n for job %s: %s", job_id, exc)
         set_image_job_failed(job_id, str(exc))
 
 
@@ -199,6 +137,7 @@ def _process(
 
 @router.post("")
 async def create_image_job(
+    request: Request,
     background_tasks: BackgroundTasks,
     image: UploadFile = File(...),
     prompt: Optional[str] = Form(None),
@@ -207,10 +146,7 @@ async def create_image_job(
     """
     Submit an image for AI enhancement.
 
-    The endpoint returns in < 200ms — only a MongoDB write happens here.
-    All GCS uploads and the n8n call run in a background thread after the
-    response is already sent, so there is no browser-side timeout or CORS.
-
+    Returns in < 200ms (only a MongoDB write + background task scheduling).
     Poll GET /image-jobs/{id} every 5 s until status = completed | failed.
     """
     _check_access(current_user)
@@ -222,14 +158,17 @@ async def create_image_job(
     content_type = (image.content_type or "image/jpeg").split(";")[0].strip()
     safe_filename = image.filename or "image.jpg"
 
-    # Only DB write happens in the request handler — guaranteed fast return
     job_id = create_image_job_record(
         user_email=current_user["email"],
         prompt=prompt,
         original_filename=safe_filename,
     )
 
-    # Everything else (GCS + n8n) runs after the response is sent
+    # Build callback URL using the incoming request's base URL so it works in
+    # any environment (local, Cloud Run, custom domain).
+    base = str(request.base_url).rstrip("/")
+    callback_url = f"{base}/image-jobs/{job_id}/complete"
+
     background_tasks.add_task(
         _process,
         job_id,
@@ -237,10 +176,97 @@ async def create_image_job(
         content_type,
         safe_filename,
         prompt or "",
+        callback_url,
     )
 
     doc = get_image_job(job_id, current_user["email"])
     return _to_response(doc)
+
+
+@router.post("/{job_id}/complete")
+async def image_job_complete(job_id: str, request: Request):
+    """
+    Callback endpoint called by n8n after processing is done.
+
+    Expected JSON body (sent by n8n HTTP Request node):
+    {
+      "callback_secret": "<secret>",
+      "images": [
+        {"data": "<base64>", "content_type": "image/png"},
+        ...
+      ]
+    }
+
+    Or for a single image:
+    {
+      "callback_secret": "<secret>",
+      "image": "<base64>",
+      "content_type": "image/png"
+    }
+    """
+    body = await request.json()
+
+    # Verify secret
+    received_secret = body.get("callback_secret", "")
+    expected_secret = settings.N8N_CALLBACK_SECRET
+    if not hmac.compare_digest(received_secret, expected_secret):
+        _log.warning("Invalid callback_secret for job %s", job_id)
+        raise HTTPException(status_code=403, detail="Invalid callback secret")
+
+    # Normalise to list of (bytes, content_type)
+    result_pairs: List[tuple] = []
+
+    images_list = body.get("images")
+    if images_list and isinstance(images_list, list):
+        for item in images_list:
+            raw_b64 = item.get("data", "")
+            item_ct  = item.get("content_type", "image/png")
+            try:
+                result_pairs.append((base64.b64decode(raw_b64), item_ct))
+            except Exception:
+                pass
+    else:
+        raw   = body.get("image") or body.get("data") or body.get("result") or body.get("output")
+        img_ct = body.get("content_type", "image/png")
+        if raw is None:
+            _log.error("Callback for job %s had no image data", job_id)
+            set_image_job_failed(job_id, "Callback contained no image data")
+            return {"ok": False}
+
+        if isinstance(raw, str) and raw.startswith("http"):
+            import requests as _req
+            img_resp = _req.get(raw, timeout=60)
+            dl_ct = img_resp.headers.get("content-type", "image/png").split(";")[0].strip()
+            result_pairs.append((img_resp.content, dl_ct))
+        elif isinstance(raw, str):
+            cleaned = raw.split(",", 1)[-1] if "," in raw else raw
+            result_pairs.append((base64.b64decode(cleaned), img_ct))
+        else:
+            set_image_job_failed(job_id, "Unexpected image format in callback")
+            return {"ok": False}
+
+    if not result_pairs:
+        set_image_job_failed(job_id, "Callback contained no usable images")
+        return {"ok": False}
+
+    # Upload results to GCS
+    result_urls: List[str] = []
+    for i, (img_bytes, img_ct) in enumerate(result_pairs):
+        r_ext = (img_ct.split("/")[-1].split(";")[0] or "png")[:10]
+        blob  = f"image_jobs/{job_id}/result_{i}.{r_ext}"
+        try:
+            url = upload_bytes_to_gcs(img_bytes, blob, img_ct)
+            result_urls.append(url)
+        except Exception as exc:
+            _log.error("GCS upload failed for result %d of job %s: %s", i, job_id, exc)
+
+    if result_urls:
+        set_image_job_completed(job_id, result_urls)
+        _log.info("Job %s completed via callback — %d result(s)", job_id, len(result_urls))
+        return {"ok": True, "result_count": len(result_urls)}
+    else:
+        set_image_job_failed(job_id, "Failed to store result images to cloud storage")
+        return {"ok": False}
 
 
 @router.get("")
