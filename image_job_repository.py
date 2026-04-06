@@ -1,0 +1,92 @@
+"""
+Repository layer for Creative Studio image enhancement jobs.
+Each job is scoped to a user (by email) and tracks the async n8n pipeline.
+"""
+from datetime import datetime
+from enum import Enum
+from typing import Any, Dict, List, Optional
+from uuid import uuid4
+
+from db import image_jobs_collection
+
+
+class ImageJobStatus(str, Enum):
+    PENDING = "pending"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+def _now_iso() -> str:
+    return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def create_image_job_record(
+    user_email: str,
+    prompt: Optional[str] = None,
+    original_filename: Optional[str] = None,
+    original_url: Optional[str] = None,
+) -> str:
+    """Insert a new image job document and return its job_id."""
+    job_id = str(uuid4())
+    doc: Dict[str, Any] = {
+        "_id": job_id,
+        "job_id": job_id,
+        "user_email": user_email,
+        "status": ImageJobStatus.PENDING.value,
+        "created_at": _now_iso(),
+        "completed_at": None,
+        "prompt": prompt,
+        "original_filename": original_filename,
+        "original_url": original_url,
+        "result_urls": [],
+        "error": None,
+    }
+    image_jobs_collection.insert_one(doc)
+    return job_id
+
+
+def update_original_url(job_id: str, original_url: str) -> None:
+    image_jobs_collection.update_one(
+        {"_id": job_id},
+        {"$set": {"original_url": original_url}},
+    )
+
+
+def set_image_job_completed(job_id: str, result_urls: List[str]) -> None:
+    image_jobs_collection.update_one(
+        {"_id": job_id},
+        {
+            "$set": {
+                "status": ImageJobStatus.COMPLETED.value,
+                "completed_at": _now_iso(),
+                "result_urls": result_urls,
+                "error": None,
+            }
+        },
+    )
+
+
+def set_image_job_failed(job_id: str, error: str) -> None:
+    image_jobs_collection.update_one(
+        {"_id": job_id},
+        {
+            "$set": {
+                "status": ImageJobStatus.FAILED.value,
+                "completed_at": _now_iso(),
+                "error": error,
+            }
+        },
+    )
+
+
+def get_image_job(job_id: str, user_email: str) -> Optional[Dict[str, Any]]:
+    return image_jobs_collection.find_one({"_id": job_id, "user_email": user_email})
+
+
+def list_image_jobs(user_email: str, limit: int = 50) -> List[Dict[str, Any]]:
+    return list(
+        image_jobs_collection.find(
+            {"user_email": user_email},
+            sort=[("created_at", -1)],
+        ).limit(limit)
+    )

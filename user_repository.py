@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import Optional
+from typing import List, Optional
 
 from bson import ObjectId
 from passlib.context import CryptContext
@@ -34,6 +34,8 @@ def create_user(email: str, password: str, max_runs_per_month: int = 20) -> dict
         raise ValueError("User with this email already exists")
     now = datetime.now(timezone.utc)
     is_first_user = users_collection.count_documents({}) == 0
+    # First user (admin) gets all services; subsequent users get ABCD Analyzer only.
+    default_services = ["abcd_analyzer", "creative_studio"] if is_first_user else ["abcd_analyzer"]
     doc = {
         "email": email_norm,
         "password_hash": hash_password(password),
@@ -42,10 +44,27 @@ def create_user(email: str, password: str, max_runs_per_month: int = 20) -> dict
         "max_runs_per_month": max_runs_per_month,
         "runs_this_period": 0,
         "usage_period_start": now,
+        "allowed_services": default_services,
     }
     result = users_collection.insert_one(doc)
     doc["_id"] = result.inserted_id
     return doc
+
+
+def update_user_services(user_id: str, allowed_services: List[str]) -> bool:
+    """Update which services a user can access. Returns True if user was found."""
+    if not ObjectId.is_valid(user_id):
+        return False
+    result = users_collection.update_one(
+        {"_id": ObjectId(user_id)},
+        {"$set": {"allowed_services": allowed_services}},
+    )
+    return result.matched_count > 0
+
+
+def list_users(skip: int = 0, limit: int = 200) -> List[dict]:
+    """List all users sorted by email, for admin use."""
+    return list(users_collection.find({}, sort=[("email", 1)]).skip(skip).limit(limit))
 
 
 def can_consume_run_and_increment(user: dict) -> bool:
