@@ -94,7 +94,7 @@ def _process(
     ext = (content_type.split("/")[-1].split(";")[0] or "jpg")[:10]
     try:
         original_url = upload_bytes_to_gcs(
-            image_data, f"abcd-uploads/{job_id}/original.{ext}", content_type
+            image_data, f"image_jobs/{job_id}/original.{ext}", content_type
         )
         update_original_url(job_id, original_url)
     except Exception as exc:
@@ -176,7 +176,7 @@ def _process(
         result_urls: List[str] = []
         for i, (img_bytes, img_ct) in enumerate(result_pairs):
             r_ext = (img_ct.split("/")[-1].split(";")[0] or "png")[:10]
-            blob  = f"abcd-uploads/{job_id}/result_{i}.{r_ext}"
+            blob  = f"image_jobs/{job_id}/result_{i}.{r_ext}"
             try:
                 url = upload_bytes_to_gcs(img_bytes, blob, img_ct)
                 result_urls.append(url)

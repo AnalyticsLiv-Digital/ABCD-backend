@@ -60,8 +60,6 @@ class Settings:
     # Creative Studio – image enhancement via n8n
     # The n8n webhook is called server-side (background thread), so no CORS or timeout issues.
     N8N_IMAGE_WEBHOOK_URL: str = os.getenv("N8N_IMAGE_WEBHOOK_URL", "https://n8n.analyticsliv.com/webhook/image-agent")
-    # GCS bucket for storing Creative Studio images. Falls back to GCS_BUCKET if not set.
-    GCS_BUCKET: str = os.getenv("GCS_BUCKET", "")
 
 
 settings = Settings()

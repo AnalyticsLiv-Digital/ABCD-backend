@@ -15,7 +15,7 @@ def _get_storage_client():
 
 
 def _bucket_name() -> str:
-    return settings.GCS_IMAGES_BUCKET or settings.GCS_BUCKET
+    return settings.GCS_BUCKET
 
 
 def upload_bytes_to_gcs(data: bytes, blob_name: str, content_type: str = "image/png") -> str:
