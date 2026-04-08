@@ -164,9 +164,13 @@ async def create_image_job(
         original_filename=safe_filename,
     )
 
-    # Build callback URL using the incoming request's base URL so it works in
-    # any environment (local, Cloud Run, custom domain).
-    base = str(request.base_url).rstrip("/")
+    # Build callback URL. Prefer BACKEND_PUBLIC_URL (required for local dev since
+    # n8n is external and cannot reach localhost). Falls back to request.base_url
+    # for cloud deployments where the ingress URL is already correct.
+    if settings.BACKEND_PUBLIC_URL:
+        base = settings.BACKEND_PUBLIC_URL.rstrip("/")
+    else:
+        base = str(request.base_url).rstrip("/")
     callback_url = f"{base}/image-jobs/{job_id}/complete"
 
     background_tasks.add_task(

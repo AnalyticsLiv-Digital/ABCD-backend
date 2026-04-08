@@ -62,6 +62,13 @@ class Settings:
     N8N_IMAGE_WEBHOOK_URL: str = os.getenv("N8N_IMAGE_WEBHOOK_URL", "https://n8n.analyticsliv.com/webhook/image-agent")
     # Secret sent to n8n and echoed back in the callback so we can verify origin.
     N8N_CALLBACK_SECRET: str = os.getenv("N8N_CALLBACK_SECRET", "change-me-callback-secret")
+    # Public base URL of this backend — used to build the n8n callback URL.
+    # MUST be set when running locally (e.g. via ngrok) so n8n can reach it.
+    # Example: https://abc123.ngrok.io  or  https://your-cloud-run-url
+    BACKEND_PUBLIC_URL: str = os.getenv("BACKEND_PUBLIC_URL", "")
+
+    # Creative Resize – image resizing via n8n
+    N8N_RESIZE_WEBHOOK_URL: str = os.getenv("N8N_RESIZE_WEBHOOK_URL", "")
 
 
 settings = Settings()

@@ -15,6 +15,7 @@ from routers.jobs import router as jobs_router
 from routers.auth import router as auth_router
 from routers.public import router as public_router
 from routers.image_jobs import router as image_jobs_router
+from routers.resize_jobs import router as resize_jobs_router
 
 
 logging.basicConfig(
@@ -65,6 +66,7 @@ app.include_router(auth_router)
 app.include_router(jobs_router)
 app.include_router(public_router)
 app.include_router(image_jobs_router)
+app.include_router(resize_jobs_router)
 
 
 @app.get("/health")
