@@ -1,6 +1,12 @@
 """
 Repository layer for Creative Resize jobs.
-Each job tracks an async n8n pipeline that resizes/adapts an image to a target format.
+Each job tracks an async n8n pipeline that resizes/adapts an image to target formats.
+
+Payload sent to n8n webhook (multipart/form-data):
+  - data         : original image file (field name "data")
+  - sizes        : JSON string — [{name, width, height}, …]
+  - max_size_kb  : integer (KB limit per output image)
+  - email        : user email for n8n to deliver results
 """
 from datetime import datetime
 from typing import Any, Dict, List, Optional
@@ -17,11 +23,8 @@ def create_resize_job_record(
     user_email: str,
     original_filename: Optional[str] = None,
     original_url: Optional[str] = None,
-    target_format: Optional[str] = None,
-    target_width: Optional[int] = None,
-    target_height: Optional[int] = None,
-    quality: Optional[str] = "standard",
-    fit_mode: Optional[str] = "cover",
+    sizes: Optional[List[Dict]] = None,
+    max_size_kb: int = 999000,
 ) -> str:
     """Insert a new resize job document and return its job_id."""
     job_id = str(uuid4())
@@ -34,11 +37,8 @@ def create_resize_job_record(
         "completed_at": None,
         "original_filename": original_filename,
         "original_url": original_url,
-        "target_format": target_format,
-        "target_width": target_width,
-        "target_height": target_height,
-        "quality": quality,
-        "fit_mode": fit_mode,
+        "sizes": sizes or [],
+        "max_size_kb": max_size_kb,
         "result_urls": [],
         "error": None,
     }

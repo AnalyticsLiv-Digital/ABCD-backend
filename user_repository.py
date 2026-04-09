@@ -1,5 +1,5 @@
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from bson import ObjectId
 from passlib.context import CryptContext
@@ -10,6 +10,10 @@ from db import users_collection
 
 # Use PBKDF2-SHA256 to avoid bcrypt backend issues on Windows
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
+
+# Services tracked for per-module usage
+ALL_SERVICES = ["abcd_analyzer", "creative_studio", "creative_resize"]
+DEFAULT_SERVICE_LIMIT = 20
 
 
 def hash_password(password: str) -> str:
@@ -34,7 +38,6 @@ def create_user(email: str, password: str, max_runs_per_month: int = 20) -> dict
         raise ValueError("User with this email already exists")
     now = datetime.now(timezone.utc)
     is_first_user = users_collection.count_documents({}) == 0
-    # First user (admin) gets all services; subsequent users get ABCD Analyzer only.
     default_services = ["abcd_analyzer", "creative_studio"] if is_first_user else ["abcd_analyzer"]
     doc = {
         "email": email_norm,
@@ -45,6 +48,10 @@ def create_user(email: str, password: str, max_runs_per_month: int = 20) -> dict
         "runs_this_period": 0,
         "usage_period_start": now,
         "allowed_services": default_services,
+        # Per-module usage limits (admin-configurable, default 20 each)
+        "service_limits": {s: DEFAULT_SERVICE_LIMIT for s in ALL_SERVICES},
+        # Per-module usage counters (reset each calendar month)
+        "service_usage": {s: 0 for s in ALL_SERVICES},
     }
     result = users_collection.insert_one(doc)
     doc["_id"] = result.inserted_id
@@ -62,47 +69,90 @@ def update_user_services(user_id: str, allowed_services: List[str]) -> bool:
     return result.matched_count > 0
 
 
+def update_user_service_limits(user_id: str, service_limits: Dict[str, int]) -> bool:
+    """Admin: set per-module usage limits for a user. Returns True if user was found."""
+    if not ObjectId.is_valid(user_id):
+        return False
+    result = users_collection.update_one(
+        {"_id": ObjectId(user_id)},
+        {"$set": {"service_limits": service_limits}},
+    )
+    return result.matched_count > 0
+
+
 def list_users(skip: int = 0, limit: int = 200) -> List[dict]:
     """List all users sorted by email, for admin use."""
     return list(users_collection.find({}, sort=[("email", 1)]).skip(skip).limit(limit))
 
 
-def can_consume_run_and_increment(user: dict) -> bool:
-    """Check usage limits for the user and increment runs if allowed.
-
-    - If usage_period_start is in a previous calendar month, reset counters.
-    - If runs_this_period < max_runs_per_month, increment and return True.
-    - Else, return False.
+def check_and_increment_service_usage(user: dict, service_id: str) -> bool:
     """
+    Check per-module usage limit for a user and increment if allowed.
+
+    Rules:
+    - Admin users: always allowed (infinite usage, no increment stored).
+    - Monthly reset: if the current calendar month differs from usage_period_start,
+      all service_usage counters reset to 0 before checking.
+    - Limit source: user.service_limits[service_id], defaults to DEFAULT_SERVICE_LIMIT (20).
+
+    Returns True if the action is allowed (and counter was incremented).
+    Returns False if the limit is already reached.
+    """
+    roles = user.get("roles") or []
+    if "admin" in roles:
+        return True  # admins are unlimited — don't store usage
+
     now = datetime.now(timezone.utc)
+
+    # Detect new calendar month
     period_start = user.get("usage_period_start") or now
     if isinstance(period_start, str):
         period_start = datetime.fromisoformat(period_start)
-
-    # New period if month or year changed
     new_period = period_start.year != now.year or period_start.month != now.month
+
+    # Current usage for this service (0 if new period or never used)
     if new_period:
-        runs = 0
+        current_usage = 0
     else:
-        runs = int(user.get("runs_this_period") or 0)
+        service_usage = user.get("service_usage") or {}
+        current_usage = int(service_usage.get(service_id, 0))
 
-    max_runs = int(user.get("max_runs_per_month") or 0)
-    if max_runs <= 0:
-        max_runs = 0
+    # Limit for this service
+    service_limits = user.get("service_limits") or {}
+    limit = int(service_limits.get(service_id, DEFAULT_SERVICE_LIMIT))
 
-    if max_runs and runs >= max_runs:
+    if current_usage >= limit:
         return False
 
     # Increment
-    runs += 1
-    users_collection.update_one(
-        {"_id": user["_id"]},
-        {
-            "$set": {
-                "runs_this_period": runs,
-                "usage_period_start": now if new_period else period_start,
-            }
-        },
-    )
+    new_usage = current_usage + 1
+    total_runs = new_usage if new_period else (int(user.get("runs_this_period") or 0) + 1)
+
+    if new_period:
+        # Reset all service counters, set only this one to 1
+        users_collection.update_one(
+            {"_id": user["_id"]},
+            {"$set": {
+                "service_usage": {service_id: new_usage},
+                "usage_period_start": now,
+                "runs_this_period": new_usage,
+            }},
+        )
+    else:
+        users_collection.update_one(
+            {"_id": user["_id"]},
+            {"$inc": {
+                f"service_usage.{service_id}": 1,
+                "runs_this_period": 1,
+            }},
+        )
+
     return True
 
+
+def can_consume_run_and_increment(user: dict) -> bool:
+    """
+    Legacy global limit check — kept for backward compat.
+    New code should use check_and_increment_service_usage() instead.
+    """
+    return check_and_increment_service_usage(user, "abcd_analyzer")

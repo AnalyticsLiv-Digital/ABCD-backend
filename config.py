@@ -68,7 +68,12 @@ class Settings:
     BACKEND_PUBLIC_URL: str = os.getenv("BACKEND_PUBLIC_URL", "")
 
     # Creative Resize – image resizing via n8n
-    N8N_RESIZE_WEBHOOK_URL: str = os.getenv("N8N_RESIZE_WEBHOOK_URL", "")
+    N8N_RESIZE_WEBHOOK_URL: str = os.getenv(
+        "N8N_RESIZE_WEBHOOK_URL",
+        "https://n8n.analyticsliv.com/webhook/af4de70c-70d7-4057-8895-1379d004191e",
+    )
+    # Max output file size hint passed to the n8n resize workflow (in KB)
+    N8N_RESIZE_MAX_SIZE_KB: int = int(os.getenv("N8N_RESIZE_MAX_SIZE_KB", "999000"))
 
 
 settings = Settings()
