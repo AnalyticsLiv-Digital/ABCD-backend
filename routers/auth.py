@@ -1,6 +1,6 @@
 from datetime import datetime, timedelta, timezone
 import logging
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from bson import ObjectId
 from fastapi import APIRouter, Depends, HTTPException, status
@@ -8,7 +8,16 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr, Field
 
 from auth_utils import create_access_token, decode_access_token
-from user_repository import create_user, get_user_by_email, list_users, update_user_services, verify_password
+from user_repository import (
+    ALL_SERVICES,
+    DEFAULT_SERVICE_LIMIT,
+    create_user,
+    get_user_by_email,
+    list_users,
+    update_user_services,
+    update_user_service_limits,
+    verify_password,
+)
 from db import access_requests_collection
 
 
@@ -34,7 +43,7 @@ class UserCreate(UserBase):
     max_runs_per_month: int = 20
 
 
-VALID_SERVICES = {"abcd_analyzer", "creative_studio"}
+VALID_SERVICES = {"abcd_analyzer", "creative_studio", "creative_resize"}
 
 
 class UserPublic(UserBase):
@@ -44,6 +53,8 @@ class UserPublic(UserBase):
     runs_this_period: int
     is_admin: bool
     allowed_services: List[str] = ["abcd_analyzer"]
+    service_limits: Dict[str, int] = {}
+    service_usage: Dict[str, int] = {}
 
 
 class UserAdminView(UserPublic):
@@ -53,6 +64,10 @@ class UserAdminView(UserPublic):
 
 class UpdateServicesRequest(BaseModel):
     allowed_services: List[str]
+
+
+class UpdateLimitsRequest(BaseModel):
+    service_limits: Dict[str, int]
 
 
 class AccessRequestIn(BaseModel):
@@ -77,8 +92,15 @@ class AccessDecision(BaseModel):
 def _user_public(user: dict) -> UserPublic:
     roles = user.get("roles") or []
     is_admin_user = "admin" in roles
-    # Default: admin gets all services; regular users get abcd_analyzer only.
     default_services = ["abcd_analyzer", "creative_studio"] if is_admin_user else ["abcd_analyzer"]
+
+    # Back-fill service_limits for users created before this feature
+    raw_limits = user.get("service_limits") or {}
+    service_limits = {s: int(raw_limits.get(s, DEFAULT_SERVICE_LIMIT)) for s in ALL_SERVICES}
+
+    raw_usage = user.get("service_usage") or {}
+    service_usage = {s: int(raw_usage.get(s, 0)) for s in ALL_SERVICES}
+
     return UserPublic(
         id=str(user["_id"]),
         email=user["email"],
@@ -87,6 +109,8 @@ def _user_public(user: dict) -> UserPublic:
         runs_this_period=int(user.get("runs_this_period") or 0),
         is_admin=is_admin_user,
         allowed_services=user.get("allowed_services", default_services),
+        service_limits=service_limits,
+        service_usage=service_usage,
     )
 
 
@@ -283,4 +307,24 @@ async def update_user_service_access(
     if not success:
         raise HTTPException(status_code=404, detail="User not found")
     return {"detail": "Services updated", "allowed_services": body.allowed_services}
+
+
+@router.patch("/users/{user_id}/limits")
+async def update_user_service_limits_endpoint(
+    user_id: str,
+    body: UpdateLimitsRequest,
+    current_user: dict = Depends(get_current_user),
+):
+    """Admin: set per-module monthly usage limits for a user."""
+    _ensure_admin(current_user)
+    invalid = set(body.service_limits.keys()) - VALID_SERVICES
+    if invalid:
+        raise HTTPException(status_code=400, detail=f"Unknown services: {sorted(invalid)}")
+    for svc, val in body.service_limits.items():
+        if not isinstance(val, int) or val < 0:
+            raise HTTPException(status_code=400, detail=f"Limit for {svc} must be a non-negative integer")
+    success = update_user_service_limits(user_id, body.service_limits)
+    if not success:
+        raise HTTPException(status_code=404, detail="User not found")
+    return {"detail": "Limits updated", "service_limits": body.service_limits}
 

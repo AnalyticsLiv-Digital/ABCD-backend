@@ -11,4 +11,5 @@ jobs_collection = _db[settings.MONGODB_JOBS_COLLECTION]
 users_collection = _db["users"]
 access_requests_collection = _db["access_requests"]
 image_jobs_collection = _db["image_jobs"]
+resize_jobs_collection = _db["resize_jobs"]
 

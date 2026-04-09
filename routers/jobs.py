@@ -182,12 +182,12 @@ async def create_job(
     brand_name = request.brand_name or "My Brand"
 
     # Enforce per-user usage limits
-    from user_repository import can_consume_run_and_increment
+    from user_repository import check_and_increment_service_usage
 
-    if not can_consume_run_and_increment(current_user):
+    if not check_and_increment_service_usage(current_user, "abcd_analyzer"):
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Monthly analysis limit reached for your plan.",
+            status_code=429,
+            detail="Monthly usage limit reached for ABCD Analyzer. Contact an admin to increase your limit.",
         )
     # Prepare extra metadata to persist with the job document so workers/ABCD can use it.
     extra_metadata: Dict[str, Any] = {}
@@ -260,12 +260,12 @@ async def upload_job(
     if not file.content_type or "mp4" not in file.content_type:
         raise HTTPException(status_code=400, detail="Only MP4 video uploads are supported.")
 
-    from user_repository import can_consume_run_and_increment
+    from user_repository import check_and_increment_service_usage
 
-    if not can_consume_run_and_increment(current_user):
+    if not check_and_increment_service_usage(current_user, "abcd_analyzer"):
         raise HTTPException(
-            status_code=status.HTTP_403_FORBIDDEN,
-            detail="Monthly analysis limit reached for your plan.",
+            status_code=429,
+            detail="Monthly usage limit reached for ABCD Analyzer. Contact an admin to increase your limit.",
         )
 
     extra_metadata: Dict[str, Any] = {}
