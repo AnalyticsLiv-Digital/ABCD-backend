@@ -166,6 +166,26 @@ def _process(
     result_pairs = _extract_images_from_response(resp)
 
     if not result_pairs:
+        # Check if n8n delivered images via email instead of returning them in the
+        # response body.  The workflow returns a JSON array like:
+        #   [{"email":"…", "emailBody":"…", "attachmentKeys":"img1,img2,img3"}]
+        # In this case the job succeeded — images were sent to the user's inbox.
+        try:
+            body = resp.json()
+            if isinstance(body, list) and len(body) > 0:
+                item = body[0] if isinstance(body[0], dict) else {}
+                if "attachmentKeys" in item or "emailBody" in item:
+                    keys = item.get("attachmentKeys", "")
+                    count = len([k for k in keys.split(",") if k.strip()]) if keys else 0
+                    _log.info(
+                        "Resize job %s: n8n delivered %d image(s) via email to %s — marking completed",
+                        job_id, count, item.get("email", "?"),
+                    )
+                    set_resize_job_completed(job_id, [])
+                    return
+        except Exception:
+            pass
+
         _log.error(
             "Resize job %s: could not extract images from n8n response.\n"
             "  Content-Type : %s\n"
