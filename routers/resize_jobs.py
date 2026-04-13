@@ -347,6 +347,7 @@ async def create_resize_job(
     image: UploadFile = File(...),
     sizes: str = Form(...),            # JSON string: [{"name":"…","width":W,"height":H}, …]
     max_size_kb: int = Form(999000),
+    email: Optional[str] = Form(None), # notification email; defaults to authenticated user's email
     current_user: dict = Depends(get_current_user),
 ):
     """
@@ -356,7 +357,8 @@ async def create_resize_job(
       [{"name":"1200x628","width":1200,"height":628},
        {"name":"1200x1200","width":1200,"height":1200}]
 
-    max_size_kb: maximum output file size hint (default 999000 = ~1 GB, effectively unlimited)
+    max_size_kb: maximum output file size in KB (default 999000 = ~1 GB, effectively unlimited)
+    email: notification / delivery email (defaults to authenticated user's email if omitted)
     """
     _check_access(current_user)
 
@@ -376,6 +378,9 @@ async def create_resize_job(
                 raise ValueError(f"Each size must have integer width and height: {s}")
     except (json.JSONDecodeError, ValueError) as exc:
         raise HTTPException(400, f"Invalid sizes parameter: {exc}")
+
+    # Resolve notification email — user-supplied value or fall back to authenticated email
+    notify_email = (email or "").strip() or current_user["email"]
 
     image_data = await image.read()
     if len(image_data) > 20 * 1024 * 1024:
@@ -397,7 +402,7 @@ async def create_resize_job(
         image_data,
         content_type,
         safe_filename,
-        current_user["email"],
+        notify_email,
         sizes_list,
         max_size_kb,
     )
