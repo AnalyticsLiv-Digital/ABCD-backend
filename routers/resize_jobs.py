@@ -77,6 +77,7 @@ def _to_response(doc: dict) -> dict:
         "sizes":             sizes,
         "max_size_kb":       doc.get("max_size_kb", 999000),
         "result_urls":       doc.get("result_urls") or [],
+        "result_images":     doc.get("result_images") or [],  # [{url, name}, …]
         "error":             doc.get("error"),
     }
 
@@ -166,26 +167,6 @@ def _process(
     result_pairs = _extract_images_from_response(resp)
 
     if not result_pairs:
-        # Check if n8n delivered images via email instead of returning them in the
-        # response body.  The workflow returns a JSON array like:
-        #   [{"email":"…", "emailBody":"…", "attachmentKeys":"img1,img2,img3"}]
-        # In this case the job succeeded — images were sent to the user's inbox.
-        try:
-            body = resp.json()
-            if isinstance(body, list) and len(body) > 0:
-                item = body[0] if isinstance(body[0], dict) else {}
-                if "attachmentKeys" in item or "emailBody" in item:
-                    keys = item.get("attachmentKeys", "")
-                    count = len([k for k in keys.split(",") if k.strip()]) if keys else 0
-                    _log.info(
-                        "Resize job %s: n8n delivered %d image(s) via email to %s — marking completed",
-                        job_id, count, item.get("email", "?"),
-                    )
-                    set_resize_job_completed(job_id, [])
-                    return
-        except Exception:
-            pass
-
         _log.error(
             "Resize job %s: could not extract images from n8n response.\n"
             "  Content-Type : %s\n"
@@ -197,95 +178,134 @@ def _process(
         set_resize_job_failed(job_id, "n8n response contained no image data.")
         return
 
-    # 5. Upload each resized image to GCS
-    result_urls = _upload_result_pairs(job_id, result_pairs)
+    # 5. Upload each resized image to GCS; collect {url, name} metadata
+    result_images = _upload_result_pairs(job_id, result_pairs)
 
-    if result_urls:
-        set_resize_job_completed(job_id, result_urls)
-        _log.info("Resize job %s completed — %d result(s) stored", job_id, len(result_urls))
+    if result_images:
+        result_urls = [ri["url"] for ri in result_images]
+        set_resize_job_completed(job_id, result_urls, result_images)
+        _log.info("Resize job %s completed — %d result(s) stored in GCS", job_id, len(result_urls))
     else:
         set_resize_job_failed(job_id, "Failed to store resized images to cloud storage.")
 
 
 def _extract_images_from_response(resp: Any) -> List[tuple]:
     """
-    Extract (bytes, content_type) pairs from the raw n8n HTTP response.
+    Extract (bytes_or_url, content_type, name) triples from the raw n8n HTTP response.
 
-    Handles three response shapes n8n workflows commonly produce:
+    Handles four response shapes:
 
-    1. Binary image  — Content-Type: image/png  (single image in body)
-    2. JSON array    — Content-Type: application/json
+    1. Binary image  — Content-Type: image/png (single image in body)
+    2. JSON array    — the actual Ad-lens-final-prod format:
+         [{"email":"…","emailBody":"…","attachmentKeys":"img1,img2",
+           "images":[{"name":"img1","data":"<base64>"},{"name":"img2","data":"<base64>"}]}]
+       Also handles legacy shapes:
          [{"binary": {"data": {"data": [...], "mimeType": "image/png"}}}, …]
-         OR [{"name":"1200x628", "url":"https://…"}, …]
-         OR {"images": [{"data": "<b64>", "content_type": "image/png"}, …]}
-         OR {"image": "<b64 or url>"}
-    3. Multipart     — Content-Type: multipart/form-data (rare but handled)
+         [{"name":"1200x628", "url":"https://…"}, …]
+    3. JSON dict     — {"images": [{data, content_type}, …]} or {"image": "…"}
+    4. Raw binary fallback
     """
-    result_pairs: List[tuple] = []
+    result_pairs: List[tuple] = []   # (bytes_or_url, content_type, name)
     ct = (resp.headers.get("content-type") or "").split(";")[0].strip().lower()
 
     # ── Shape 1: raw binary image ────────────────────────────────────────────
     if ct.startswith("image/"):
-        result_pairs.append((resp.content, ct))
+        result_pairs.append((resp.content, ct, ""))
         return result_pairs
 
-    # ── Shape 2: JSON ────────────────────────────────────────────────────────
+    # ── Shape 2 & 3: JSON ────────────────────────────────────────────────────
     if "json" in ct:
         try:
             body = resp.json()
         except Exception:
             return result_pairs
 
-        # n8n "Return Binary Data" node → list of item objects
+        # JSON array — iterate items
         if isinstance(body, list):
             for item in body:
-                # n8n binary envelope: item.binary.data.data (bytes array) + mimeType
-                binary = item.get("binary") if isinstance(item, dict) else None
+                if not isinstance(item, dict):
+                    continue
+
+                # ── Priority A: n8n binary envelope ──────────────────────────
+                binary = item.get("binary")
                 if isinstance(binary, dict):
                     for _key, bval in binary.items():
                         mime = bval.get("mimeType", "image/png")
-                        raw = bval.get("data")          # base64 string
+                        raw = bval.get("data")
                         if raw:
                             try:
-                                result_pairs.append((base64.b64decode(raw), mime))
+                                result_pairs.append((base64.b64decode(raw), mime, _key))
                                 continue
                             except Exception:
                                 pass
                         file_path = bval.get("filePathShort") or bval.get("filePath")
                         if file_path and file_path.startswith("http"):
-                            result_pairs.append((file_path, mime))
+                            result_pairs.append((file_path, mime, _key))
                     continue
 
-                # simple {name, url} or {name, data, content_type}
-                if isinstance(item, dict):
-                    url = item.get("url") or item.get("image_url")
-                    if url and isinstance(url, str) and url.startswith("http"):
-                        result_pairs.append((url, item.get("content_type", "image/png")))
-                        continue
-                    raw = item.get("data") or item.get("image")
-                    if raw:
-                        cleaned = raw.split(",", 1)[-1] if "," in str(raw) else raw
+                # ── Priority B: nested images array ──────────────────────────
+                # Actual Ad-lens-final-prod format:
+                # {email, emailBody, attachmentKeys, images:[{name, data}, …]}
+                nested_images = item.get("images")
+                if isinstance(nested_images, list) and nested_images:
+                    for img_item in nested_images:
+                        if not isinstance(img_item, dict):
+                            continue
+                        raw_b64 = img_item.get("data", "")
+                        img_name = img_item.get("name", "")
+                        if not raw_b64:
+                            continue
+                        cleaned = (str(raw_b64).split(",", 1)[-1]
+                                   if "," in str(raw_b64) else str(raw_b64))
                         try:
-                            result_pairs.append((base64.b64decode(cleaned),
-                                                 item.get("content_type", "image/png")))
-                        except Exception:
-                            pass
+                            result_pairs.append((
+                                base64.b64decode(cleaned),
+                                "image/jpeg",
+                                img_name,
+                            ))
+                        except Exception as exc:
+                            _log.warning("Could not decode base64 image '%s': %s", img_name, exc)
+                    continue   # move on to the next list item
+
+                # ── Priority C: flat URL or base64 at item level ──────────────
+                url = item.get("url") or item.get("image_url")
+                if url and isinstance(url, str) and url.startswith("http"):
+                    result_pairs.append((
+                        url,
+                        item.get("content_type", "image/png"),
+                        item.get("name", ""),
+                    ))
+                    continue
+                raw = item.get("data") or item.get("image")
+                if raw:
+                    cleaned = str(raw).split(",", 1)[-1] if "," in str(raw) else str(raw)
+                    try:
+                        result_pairs.append((
+                            base64.b64decode(cleaned),
+                            item.get("content_type", "image/png"),
+                            item.get("name", ""),
+                        ))
+                    except Exception:
+                        pass
             return result_pairs
 
-        # dict shapes
+        # JSON dict shapes
         if isinstance(body, dict):
-            # {"images": [{data, content_type}, …]}
+            # {"images": [{data, content_type, name?}, …]}
             images_list = body.get("images")
             if isinstance(images_list, list):
                 for item in images_list:
+                    if not isinstance(item, dict):
+                        continue
                     raw_b64 = item.get("data", "")
-                    item_ct = item.get("content_type", "image/png")
+                    item_ct = item.get("content_type", "image/jpeg")
+                    item_name = item.get("name", "")
                     try:
-                        result_pairs.append((base64.b64decode(raw_b64), item_ct))
+                        result_pairs.append((base64.b64decode(raw_b64), item_ct, item_name))
                     except Exception:
                         url = item.get("url") or item.get("image_url")
                         if url and isinstance(url, str) and url.startswith("http"):
-                            result_pairs.append((url, item_ct))
+                            result_pairs.append((url, item_ct, item_name))
                 return result_pairs
 
             # {"image": "<b64 or url>", "content_type": "…"}
@@ -293,69 +313,72 @@ def _extract_images_from_response(resp: Any) -> List[tuple]:
                    or body.get("result") or body.get("output"))
             img_ct = body.get("content_type", "image/png")
             if isinstance(raw, str) and raw.startswith("http"):
-                result_pairs.append((raw, img_ct))
+                result_pairs.append((raw, img_ct, ""))
             elif isinstance(raw, str):
                 cleaned = raw.split(",", 1)[-1] if "," in raw else raw
                 try:
-                    result_pairs.append((base64.b64decode(cleaned), img_ct))
+                    result_pairs.append((base64.b64decode(cleaned), img_ct, ""))
                 except Exception:
                     pass
 
         return result_pairs
 
-    # ── Shape 3: treat anything else as raw binary (best-effort) ────────────
+    # ── Shape 4: treat anything else as raw binary (best-effort) ────────────
     if resp.content:
-        result_pairs.append((resp.content, "image/png"))
+        result_pairs.append((resp.content, "image/png", ""))
 
     return result_pairs
 
 
-def _upload_result_pairs(job_id: str, pairs: List[tuple]) -> List[str]:
+def _upload_result_pairs(job_id: str, pairs: List[tuple]) -> List[Dict[str, Any]]:
     """
-    Upload result images to GCS and return the stored URLs.
+    Upload result images to GCS and return a list of {url, name} dicts.
+
+    Each pair is (bytes_or_url, content_type, name).
 
     If an item is already a URL string:
       - Try to download it and re-upload to GCS (so we own the file).
-      - If GCS upload fails (e.g. no credentials locally), fall back to
-        storing the original URL directly — results still show in the UI.
+      - If GCS upload fails, fall back to storing the URL directly.
 
     If an item is raw bytes:
       - Upload to GCS; log error on failure (no fallback for raw bytes).
     """
     import requests as _req
-    result_urls: List[str] = []
-    for i, (img, img_ct) in enumerate(pairs):
+    result_images: List[Dict[str, Any]] = []
+
+    for i, triple in enumerate(pairs):
+        img, img_ct, img_name = triple if len(triple) == 3 else (*triple, "")
         original_url = img if (isinstance(img, str) and img.startswith("http")) else None
 
         if original_url:
-            # Download so we can re-upload to our own GCS bucket
             try:
                 dl = _req.get(original_url, timeout=60)
                 img_bytes = dl.content
-                img_ct = dl.headers.get("content-type", "image/png").split(";")[0].strip()
+                img_ct = dl.headers.get("content-type", "image/jpeg").split(";")[0].strip()
             except Exception as exc:
                 _log.warning("Could not download n8n result URL for job %s[%d]: %s — storing URL directly",
                              job_id, i, exc)
-                result_urls.append(original_url)
+                result_images.append({"url": original_url, "name": img_name or f"result_{i + 1}"})
                 continue
         else:
             img_bytes = img
 
-        r_ext = (img_ct.split("/")[-1].split(";")[0] or "png")[:10]
-        blob = f"resize_jobs/{job_id}/result_{i}.{r_ext}"
+        r_ext = (img_ct.split("/")[-1].split(";")[0] or "jpg")[:10]
+        # Use the image name (e.g. "img1") in the GCS path for traceability
+        safe_name = (img_name or f"result_{i}").replace(" ", "_")[:40]
+        blob = f"resize_jobs/{job_id}/{safe_name}.{r_ext}"
         try:
             gcs_url = upload_bytes_to_gcs(img_bytes, blob, img_ct)
-            result_urls.append(gcs_url)
+            result_images.append({"url": gcs_url, "name": img_name or f"result_{i + 1}"})
         except Exception as exc:
             _log.warning("GCS upload failed for job %s[%d]: %s", job_id, i, exc)
             if original_url:
-                # GCS not available (e.g. local dev without credentials) — use n8n URL directly
                 _log.info("Falling back to n8n URL for job %s[%d]: %s", job_id, i, original_url)
-                result_urls.append(original_url)
+                result_images.append({"url": original_url, "name": img_name or f"result_{i + 1}"})
             else:
                 _log.error("GCS upload failed and no fallback URL for job %s[%d] — result lost", job_id, i)
 
-    return result_urls
+    return result_images
 
 
 # ── Endpoints ──────────────────────────────────────────────────────────────────
@@ -463,10 +486,11 @@ async def resize_job_complete(job_id: str, request: Request):
         set_resize_job_failed(job_id, "Callback contained no image data")
         return {"ok": False}
 
-    result_urls = _upload_result_pairs(job_id, result_pairs)
+    result_images = _upload_result_pairs(job_id, result_pairs)
 
-    if result_urls:
-        set_resize_job_completed(job_id, result_urls)
+    if result_images:
+        result_urls = [ri["url"] for ri in result_images]
+        set_resize_job_completed(job_id, result_urls, result_images)
         _log.info("Resize job %s completed via callback — %d result(s)", job_id, len(result_urls))
         return {"ok": True, "result_count": len(result_urls)}
     else:
