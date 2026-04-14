@@ -40,6 +40,7 @@ def create_resize_job_record(
         "sizes": sizes or [],
         "max_size_kb": max_size_kb,
         "result_urls": [],
+        "result_images": [],   # [{url, name, width, height}] — populated on completion
         "error": None,
     }
     resize_jobs_collection.insert_one(doc)
@@ -53,7 +54,18 @@ def update_resize_original_url(job_id: str, original_url: str) -> None:
     )
 
 
-def set_resize_job_completed(job_id: str, result_urls: List[str]) -> None:
+def set_resize_job_completed(
+    job_id: str,
+    result_urls: List[str],
+    result_images: Optional[List[Dict]] = None,
+) -> None:
+    """
+    Mark the job completed.
+
+    result_urls  : flat list of GCS URLs (kept for backward-compat)
+    result_images: list of {url, name, width, height} dicts — richer metadata
+                   used by the UI to show per-image size labels and filenames.
+    """
     resize_jobs_collection.update_one(
         {"_id": job_id},
         {
@@ -61,6 +73,7 @@ def set_resize_job_completed(job_id: str, result_urls: List[str]) -> None:
                 "status": "completed",
                 "completed_at": _now_iso(),
                 "result_urls": result_urls,
+                "result_images": result_images or [],
                 "error": None,
             }
         },
