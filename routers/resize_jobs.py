@@ -498,6 +498,58 @@ async def resize_job_complete(job_id: str, request: Request):
         return {"ok": False}
 
 
+@router.get("/{job_id}/results/{image_index}/download")
+async def download_resize_result(
+    job_id: str,
+    image_index: int,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Proxy-download a single result image from GCS with Content-Disposition: attachment
+    so the browser saves the file instead of opening it in a new tab.
+    """
+    import requests as _req
+    from fastapi.responses import StreamingResponse
+
+    doc = get_resize_job(job_id, current_user["email"])
+    if not doc:
+        raise HTTPException(404, "Job not found")
+
+    result_images = doc.get("result_images") or []
+    result_urls   = doc.get("result_urls") or []
+
+    if result_images and image_index < len(result_images):
+        gcs_url  = result_images[image_index]["url"]
+        img_name = result_images[image_index].get("name", f"result_{image_index + 1}")
+    elif image_index < len(result_urls):
+        gcs_url  = result_urls[image_index]
+        img_name = f"result_{image_index + 1}"
+    else:
+        raise HTTPException(404, "Image index out of range")
+
+    try:
+        r = _req.get(gcs_url, timeout=60, stream=True)
+        r.raise_for_status()
+    except Exception as exc:
+        raise HTTPException(502, f"Could not fetch image from storage: {exc}")
+
+    ct  = r.headers.get("content-type", "image/jpeg").split(";")[0].strip()
+    ext = ct.split("/")[-1] or "jpg"
+    safe_name = img_name.replace(" ", "_")[:60]
+    filename  = f"{safe_name}.{ext}"
+
+    def _stream():
+        for chunk in r.iter_content(chunk_size=8192):
+            if chunk:
+                yield chunk
+
+    return StreamingResponse(
+        _stream(),
+        media_type=ct,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @router.get("")
 async def list_resize_jobs_endpoint(
     limit: int = 50,
