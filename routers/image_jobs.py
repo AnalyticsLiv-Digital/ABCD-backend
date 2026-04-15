@@ -15,6 +15,7 @@ import hmac
 import io
 import logging
 from typing import List, Optional
+from urllib.parse import urlencode, urlparse, urlunparse, parse_qs
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, UploadFile
 
@@ -108,16 +109,30 @@ def _process(
         import requests as _req
 
         _log.info("Sending job %s to n8n (ack timeout=30s)…", job_id)
+
+        # Append callback_url + job_id as query parameters on the webhook URL.
+        # In n8n 2.x, multipart form text fields are NOT reliably available as
+        # $json.callback_url — they end up under $json.body.* or are inaccessible
+        # when the HTTP Request node's URL expression runs.  Query parameters are
+        # always available as $json.query.callback_url regardless of body encoding.
+        parsed = urlparse(settings.N8N_IMAGE_WEBHOOK_URL)
+        existing_qs = parse_qs(parsed.query)
+        existing_qs["callback_url"] = [callback_url]
+        existing_qs["job_id"]       = [job_id]
+        webhook_url = urlunparse(parsed._replace(query=urlencode(existing_qs, doseq=True)))
+
         form_data = {
             "job_id":          job_id,
-            "callback_url":    callback_url,
+            "callback_url":    callback_url,   # kept in body for backwards-compat
             "callback_secret": settings.N8N_CALLBACK_SECRET,
         }
         if prompt:
             form_data["prompt"] = prompt
 
+        _log.info("n8n webhook URL: %s", webhook_url)
+
         resp = _req.post(
-            settings.N8N_IMAGE_WEBHOOK_URL,
+            webhook_url,
             files={"image": (filename, io.BytesIO(image_data), content_type)},
             data=form_data,
             timeout=30,   # only waiting for ack, NOT the final result
