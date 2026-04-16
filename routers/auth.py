@@ -8,6 +8,7 @@ from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr, Field
 
 from auth_utils import create_access_token, decode_access_token, verify_google_token
+from email_service import send_welcome_email
 from user_repository import (
     ALL_SERVICES,
     DEFAULT_SERVICE_LIMIT,
@@ -269,6 +270,14 @@ async def google_login(body: GoogleLoginBody):
             accept_invitation(invite["_id"])
 
         logger.info("New Google user created: %s (org=%s)", email, org.get("name"))
+
+        # Send welcome email to new user (non-blocking)
+        send_welcome_email(
+            to_email=email,
+            display_name=name,
+            org_name=org.get("name", "AdLens"),
+            allowed_services=org.get("allowed_services", ["abcd_analyzer"]),
+        )
 
     else:
         # Existing user — update login timestamp and Google sub (in case of first Google login)

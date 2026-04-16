@@ -6,8 +6,10 @@ Or from project root: uvicorn backend.main:app --reload (with PYTHONPATH=. or in
 from contextlib import asynccontextmanager
 import logging
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from config import settings
 from db import jobs_collection, ensure_indexes
@@ -65,6 +67,22 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+class SecurityHeadersMiddleware(BaseHTTPMiddleware):
+    """
+    Adds headers required for Google Sign-In (GSI) popup flow.
+    Cross-Origin-Opener-Policy must be same-origin-allow-popups so the
+    Google auth popup can postMessage the credential back to the opener window.
+    """
+    async def dispatch(self, request: Request, call_next):
+        response = await call_next(request)
+        response.headers["Cross-Origin-Opener-Policy"] = "same-origin-allow-popups"
+        response.headers["Cross-Origin-Embedder-Policy"] = "unsafe-none"
+        return response
+
+
+app.add_middleware(SecurityHeadersMiddleware)
 
 app.include_router(auth_router)
 app.include_router(jobs_router)

@@ -18,6 +18,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, EmailStr, Field
 
 from routers.auth import get_current_user
+from email_service import send_invitation_email
 from org_repository import (
     ALL_SERVICES,
     DEFAULT_ORG_SERVICE_LIMIT,
@@ -275,6 +276,15 @@ async def invite_user_to_org(
         expires_hours=body.expires_hours,
     )
     logger.info("Invitation created for %s to org %s", email, org["name"])
+
+    # Send invitation email (non-blocking — failure doesn't break the API)
+    inviter_name = current_user.get("display_name") or current_user.get("email", "AdLens Admin")
+    send_invitation_email(
+        to_email=email,
+        org_name=org["name"],
+        inviter_name=inviter_name,
+        role=body.role,
+    )
 
     return {
         "detail": f"Invitation created for {email}",
