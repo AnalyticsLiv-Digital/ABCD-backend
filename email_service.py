@@ -340,7 +340,10 @@ def _send(to_email: str, to_name: str, subject: str, html: str) -> bool:
 
     try:
         from sendgrid import SendGridAPIClient
-        from sendgrid.helpers.mail import Mail, Email, To, Content
+        from sendgrid.helpers.mail import (
+            Mail, Email, To, Content,
+            TrackingSettings, ClickTracking, OpenTracking,
+        )
 
         message = Mail(
             from_email=Email(settings.EMAIL_FROM, settings.EMAIL_FROM_NAME),
@@ -348,6 +351,14 @@ def _send(to_email: str, to_name: str, subject: str, html: str) -> bool:
             subject=subject,
             html_content=Content("text/html", html),
         )
+
+        # Disable SendGrid click & open tracking so our URLs are not replaced
+        # with sendgrid tracking URLs (url1234.domain.com/ls/click?upn=...)
+        tracking = TrackingSettings()
+        tracking.click_tracking = ClickTracking(enable=False, enable_text=False)
+        tracking.open_tracking = OpenTracking(enable=False)
+        message.tracking_settings = tracking
+
         sg = SendGridAPIClient(settings.SENDGRID_API_KEY)
         response = sg.send(message)
         _log.info("Email sent to %s (status %s)", to_email, response.status_code)
