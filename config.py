@@ -51,6 +51,11 @@ class Settings:
     JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM", "HS256")
     ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
 
+    # Google OAuth — get from GCP Console → APIs & Services → Credentials
+    # Set GOOGLE_CLIENT_ID to enable "Sign in with Google" for external users.
+    # Leave empty to disable Google login (email/password only).
+    GOOGLE_CLIENT_ID: str = os.getenv("GOOGLE_CLIENT_ID", "")
+
     # When True and GCP_PROJECT_ID is set, run real ABCD; otherwise use mock (Phase 1)
     USE_REAL_ABCD: bool = os.getenv("USE_REAL_ABCD", "true").lower() in ("1", "true", "yes")
 

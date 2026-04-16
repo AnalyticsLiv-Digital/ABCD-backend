@@ -28,6 +28,7 @@ from image_job_repository import (
     list_image_jobs,
     set_image_job_completed,
     set_image_job_failed,
+    set_image_job_processing,
     update_original_url,
 )
 from routers.auth import get_current_user
@@ -107,14 +108,10 @@ def _process(
 
     try:
         import requests as _req
+        from requests.exceptions import ReadTimeout, ConnectionError as ReqConnError
 
-        _log.info("Sending job %s to n8n (ack timeout=30s)…", job_id)
+        _log.info("Sending job %s to n8n…", job_id)
 
-        # Append callback_url + job_id as query parameters on the webhook URL.
-        # In n8n 2.x, multipart form text fields are NOT reliably available as
-        # $json.callback_url — they end up under $json.body.* or are inaccessible
-        # when the HTTP Request node's URL expression runs.  Query parameters are
-        # always available as $json.query.callback_url regardless of body encoding.
         parsed = urlparse(settings.N8N_IMAGE_WEBHOOK_URL)
         existing_qs = parse_qs(parsed.query)
         existing_qs["callback_url"] = [callback_url]
@@ -123,7 +120,7 @@ def _process(
 
         form_data = {
             "job_id":          job_id,
-            "callback_url":    callback_url,   # kept in body for backwards-compat
+            "callback_url":    callback_url,
             "callback_secret": settings.N8N_CALLBACK_SECRET,
         }
         if prompt:
@@ -131,21 +128,37 @@ def _process(
 
         _log.info("n8n webhook URL: %s", webhook_url)
 
-        resp = _req.post(
-            webhook_url,
-            files={"image": (filename, io.BytesIO(image_data), content_type)},
-            data=form_data,
-            timeout=30,   # only waiting for ack, NOT the final result
-        )
+        try:
+            resp = _req.post(
+                webhook_url,
+                files={"image": (filename, io.BytesIO(image_data), content_type)},
+                data=form_data,
+                timeout=120,  # increased: n8n may respond slowly if not using "Respond to Webhook"
+            )
+            if resp.ok:
+                _log.info("n8n ack for job %s (HTTP %s) — marking processing", job_id, resp.status_code)
+                set_image_job_processing(job_id)
+            else:
+                _log.error("n8n returned HTTP %s for job %s: %s", resp.status_code, job_id, resp.text[:200])
+                set_image_job_failed(job_id, f"Processing service returned HTTP {resp.status_code}")
 
-        if resp.ok:
-            _log.info("n8n ack received for job %s (status %s) — processing async", job_id, resp.status_code)
-        else:
-            _log.error("n8n returned HTTP %s for job %s", resp.status_code, job_id)
-            set_image_job_failed(job_id, f"Processing service returned HTTP {resp.status_code}")
+        except ReadTimeout:
+            # n8n received the request but took > 120s to ack.
+            # The workflow is almost certainly still running and will POST the callback when done.
+            # Leave the job as "processing" so the frontend keeps polling.
+            _log.warning(
+                "n8n read timeout for job %s (>120s) — workflow still running, waiting for callback",
+                job_id,
+            )
+            set_image_job_processing(job_id)
+
+        except ReqConnError as exc:
+            # Could not connect at all — n8n is down or unreachable
+            _log.error("Cannot connect to n8n for job %s: %s", job_id, exc)
+            set_image_job_failed(job_id, "Image processing service is unreachable. Try again later.")
 
     except Exception as exc:
-        _log.error("Failed to reach n8n for job %s: %s", job_id, exc)
+        _log.error("Unexpected error in background task for job %s: %s", job_id, exc)
         set_image_job_failed(job_id, str(exc))
 
 

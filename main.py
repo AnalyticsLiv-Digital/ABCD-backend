@@ -10,12 +10,13 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
 from config import settings
-from db import jobs_collection
+from db import jobs_collection, ensure_indexes
 from routers.jobs import router as jobs_router
 from routers.auth import router as auth_router
 from routers.public import router as public_router
 from routers.image_jobs import router as image_jobs_router
 from routers.resize_jobs import router as resize_jobs_router
+from routers.platform import router as platform_router
 
 
 logging.basicConfig(
@@ -42,8 +43,11 @@ async def lifespan(app: FastAPI):
             ),
             timeout=5.0,
         )
+        # Create indexes (idempotent — safe to run every startup)
+        await asyncio.get_event_loop().run_in_executor(None, ensure_indexes)
+        logger.info("MongoDB indexes ensured")
     except Exception as exc:
-        logger.warning("MongoDB connectivity check failed (non-fatal): %s", exc)
+        logger.warning("MongoDB startup check failed (non-fatal): %s", exc)
     yield
 
 
@@ -67,6 +71,7 @@ app.include_router(jobs_router)
 app.include_router(public_router)
 app.include_router(image_jobs_router)
 app.include_router(resize_jobs_router)
+app.include_router(platform_router)
 
 
 @app.get("/health")
