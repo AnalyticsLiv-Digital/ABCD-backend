@@ -56,6 +56,12 @@ class Settings:
     # Leave empty to disable Google login (email/password only).
     GOOGLE_CLIENT_ID: str = os.getenv("GOOGLE_CLIENT_ID", "")
 
+    # SendGrid — email delivery
+    SENDGRID_API_KEY: str = os.getenv("SENDGRID_API_KEY", "")
+    EMAIL_FROM: str = os.getenv("EMAIL_FROM", "noreply@analyticsliv.com")
+    EMAIL_FROM_NAME: str = os.getenv("EMAIL_FROM_NAME", "AdLens by AnalyticsLiv")
+    APP_URL: str = os.getenv("APP_URL", "https://adlens.analyticsliv.com")
+
     # When True and GCP_PROJECT_ID is set, run real ABCD; otherwise use mock (Phase 1)
     USE_REAL_ABCD: bool = os.getenv("USE_REAL_ABCD", "true").lower() in ("1", "true", "yes")
 
