@@ -12,6 +12,7 @@ from db import image_jobs_collection
 
 class ImageJobStatus(str, Enum):
     PENDING = "pending"
+    PROCESSING = "processing"   # n8n received the job, working on it
     COMPLETED = "completed"
     FAILED = "failed"
 
@@ -63,6 +64,14 @@ def set_image_job_completed(job_id: str, result_urls: List[str]) -> None:
                 "error": None,
             }
         },
+    )
+
+
+def set_image_job_processing(job_id: str) -> None:
+    """Mark job as processing — n8n received it and is working on it."""
+    image_jobs_collection.update_one(
+        {"_id": job_id},
+        {"$set": {"status": ImageJobStatus.PROCESSING.value}},
     )
 
 

@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from pydantic import BaseModel, EmailStr, Field
 
-from auth_utils import create_access_token, decode_access_token
+from auth_utils import create_access_token, decode_access_token, verify_google_token
 from user_repository import (
     ALL_SERVICES,
     DEFAULT_SERVICE_LIMIT,
@@ -18,7 +18,13 @@ from user_repository import (
     update_user_service_limits,
     verify_password,
 )
-from db import access_requests_collection
+from org_repository import (
+    get_org_by_id,
+    resolve_org_for_google_user,
+    accept_invitation,
+    get_pending_invite_for_email,
+)
+from db import access_requests_collection, users_collection
 
 
 logger = logging.getLogger(__name__)
@@ -52,6 +58,12 @@ class UserPublic(UserBase):
     max_runs_per_month: int
     runs_this_period: int
     is_admin: bool
+    is_platform_admin: bool = False
+    org_id: Optional[str] = None
+    org_role: Optional[str] = None
+    display_name: Optional[str] = None
+    picture: Optional[str] = None
+    auth_providers: List[str] = ["password"]
     allowed_services: List[str] = ["abcd_analyzer"]
     service_limits: Dict[str, int] = {}
     service_usage: Dict[str, int] = {}
@@ -89,6 +101,11 @@ class AccessDecision(BaseModel):
     note: str = Field("", max_length=1000)
 
 
+class GoogleLoginBody(BaseModel):
+    """Body for POST /auth/google — credential is the ID token from Google GSI."""
+    credential: str  # Google JWT id_token
+
+
 def _user_public(user: dict) -> UserPublic:
     roles = user.get("roles") or []
     is_admin_user = "admin" in roles
@@ -101,13 +118,20 @@ def _user_public(user: dict) -> UserPublic:
     raw_usage = user.get("service_usage") or {}
     service_usage = {s: int(raw_usage.get(s, 0)) for s in ALL_SERVICES}
 
+    org_id = user.get("org_id")
     return UserPublic(
         id=str(user["_id"]),
         email=user["email"],
-        plan=user.get("plan", "beta"),
+        plan=user.get("plan") or "beta",
         max_runs_per_month=int(user.get("max_runs_per_month") or 0),
         runs_this_period=int(user.get("runs_this_period") or 0),
         is_admin=is_admin_user,
+        is_platform_admin=bool(user.get("is_platform_admin")),
+        org_id=str(org_id) if org_id else None,
+        org_role=user.get("org_role"),
+        display_name=user.get("display_name"),
+        picture=user.get("picture"),
+        auth_providers=user.get("auth_providers", ["password"]),
         allowed_services=user.get("allowed_services", default_services),
         service_limits=service_limits,
         service_usage=service_usage,
@@ -119,12 +143,22 @@ async def get_current_user(token: str = Depends(oauth2_scheme)) -> dict:
     if not email:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Could not validate credentials",
+            detail="Invalid or expired session. Please log in again.",
             headers={"WWW-Authenticate": "Bearer"},
         )
-    user = get_user_by_email(email)  # we use email as subject
+    user = get_user_by_email(email)
     if not user:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+    if user.get("status") == "suspended":
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account suspended. Contact your administrator.")
+
+    # Attach org context so routes can read it without a second DB call
+    org_id = user.get("org_id")
+    if org_id:
+        user["_org"] = get_org_by_id(org_id)
+    else:
+        user["_org"] = None
+
     return user
 
 
@@ -145,8 +179,112 @@ async def register(user_in: UserCreate):
 @router.post("/login", response_model=Token)
 async def login(form_data: OAuth2PasswordRequestForm = Depends()):
     user = get_user_by_email(form_data.username)
-    if not user or not verify_password(form_data.password, user["password_hash"]):
+    if not user:
         raise HTTPException(status_code=400, detail="Incorrect email or password")
+    if not user.get("password_hash"):
+        # OAuth-only user — no password set, must use Google Sign-In
+        raise HTTPException(
+            status_code=400,
+            detail="This account uses Google Sign-In. Please click 'Sign in with Google'."
+        )
+    if not verify_password(form_data.password, user["password_hash"]):
+        raise HTTPException(status_code=400, detail="Incorrect email or password")
+    if user.get("status") == "suspended":
+        raise HTTPException(status_code=403, detail="Account suspended. Contact your administrator.")
+    access_token = create_access_token(subject=user["email"])
+    return Token(access_token=access_token)
+
+
+@router.post("/google", response_model=Token)
+async def google_login(body: GoogleLoginBody):
+    """
+    Sign in with Google.
+
+    Flow:
+      1. Frontend gets a credential (id_token) from Google Sign-In (GSI)
+      2. POST that token here
+      3. We verify it with Google's servers
+      4. We check if the user's email is invited or their domain is whitelisted to an org
+      5. We create the user if first-time, then issue an AdLens JWT
+
+    Returns 403 if the user's email/domain is not linked to any organization.
+    """
+    try:
+        idinfo = verify_google_token(body.credential)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+    email = idinfo["email"].lower().strip()
+    google_sub = idinfo["sub"]  # stable Google user ID
+    name = idinfo.get("name", "")
+    picture = idinfo.get("picture", "")
+
+    # --- Find or create the user ---
+    user = get_user_by_email(email)
+
+    if user is None:
+        # New user — check if they're allowed in (invite or domain whitelist)
+        org, org_role = resolve_org_for_google_user(email)
+        if org is None:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "Your account is not linked to any organization on AdLens. "
+                    "Ask your administrator to invite you or whitelist your email domain."
+                ),
+            )
+
+        # Create the user record (no password for OAuth users)
+        now = datetime.now(timezone.utc)
+        doc = {
+            "email": email,
+            "password_hash": None,           # OAuth-only user
+            "auth_providers": ["google"],
+            "google_sub": google_sub,
+            "display_name": name,
+            "picture": picture,
+            "roles": ["user"],
+            "is_platform_admin": False,
+            "org_id": org["_id"],
+            "org_role": org_role,
+            "status": "active",
+            "plan": org.get("plan", "starter"),
+            # Keep legacy fields so existing _user_public() still works
+            "allowed_services": org.get("allowed_services", ["abcd_analyzer"]),
+            "service_limits": org.get("service_limits", {}),
+            "service_usage": {s: 0 for s in ALL_SERVICES},
+            "max_runs_per_month": 0,
+            "runs_this_period": 0,
+            "usage_period_start": now,
+            "created_at": now,
+            "last_login_at": now,
+        }
+        result = users_collection.insert_one(doc)
+        doc["_id"] = result.inserted_id
+        user = doc
+
+        # Mark invitation as accepted if one existed
+        invite = get_pending_invite_for_email(email)
+        if invite:
+            accept_invitation(invite["_id"])
+
+        logger.info("New Google user created: %s (org=%s)", email, org.get("name"))
+
+    else:
+        # Existing user — update login timestamp and Google sub (in case of first Google login)
+        users_collection.update_one(
+            {"_id": user["_id"]},
+            {"$set": {
+                "last_login_at": datetime.now(timezone.utc),
+                "google_sub": google_sub,
+                "display_name": name,
+                "picture": picture,
+            }, "$addToSet": {"auth_providers": "google"}},
+        )
+
+    if user.get("status") == "suspended":
+        raise HTTPException(status_code=403, detail="Account suspended. Contact your administrator.")
+
     access_token = create_access_token(subject=user["email"])
     return Token(access_token=access_token)
 
