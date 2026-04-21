@@ -319,6 +319,50 @@ async def list_image_jobs_endpoint(
     return [_to_response(d) for d in docs]
 
 
+@router.get("/{job_id}/results/{image_index}/download")
+async def download_image_result(
+    job_id: str,
+    image_index: int,
+    current_user: dict = Depends(get_current_user),
+):
+    """Proxy-download a result image from GCS so the browser saves it instead of opening it."""
+    import requests as _req
+    from fastapi.responses import StreamingResponse
+
+    _check_access(current_user)
+    doc = get_image_job(job_id, current_user["email"])
+    if not doc:
+        raise HTTPException(404, "Job not found")
+
+    result_urls = doc.get("result_urls") or []
+    if image_index >= len(result_urls):
+        raise HTTPException(404, "Image index out of range")
+
+    gcs_url = result_urls[image_index]
+    try:
+        r = _req.get(gcs_url, timeout=60, stream=True)
+        r.raise_for_status()
+    except Exception as exc:
+        raise HTTPException(502, f"Could not fetch image from storage: {exc}")
+
+    ct = r.headers.get("content-type", "image/png").split(";")[0].strip()
+    ext = ct.split("/")[-1] or "png"
+    base = (doc.get("original_filename") or "image").rsplit(".", 1)[0]
+    suffix = f"_enhanced_{image_index + 1}" if len(result_urls) > 1 else "_enhanced"
+    filename = f"{base}{suffix}.{ext}"
+
+    def _stream():
+        for chunk in r.iter_content(chunk_size=8192):
+            if chunk:
+                yield chunk
+
+    return StreamingResponse(
+        _stream(),
+        media_type=ct,
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
 @router.get("/{job_id}")
 async def get_image_job_endpoint(
     job_id: str,
