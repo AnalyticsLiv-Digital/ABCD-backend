@@ -258,18 +258,21 @@ async def image_job_complete(job_id: str, request: Request):
     images_list = body.get("images")
     if images_list and isinstance(images_list, list):
         for item in images_list:
-            raw_b64 = item.get("data", "")
-            item_ct  = item.get("content_type", "image/png")
+            raw_b64 = item.get("data")
+            if not raw_b64:
+                _log.warning("Skipping null/empty image entry in callback for job %s", job_id)
+                continue
+            item_ct = item.get("content_type", "image/png")
             try:
                 result_pairs.append((base64.b64decode(raw_b64), item_ct))
-            except Exception:
-                pass
+            except Exception as exc:
+                _log.warning("Could not decode image entry for job %s: %s", job_id, exc)
     else:
         raw   = body.get("image") or body.get("data") or body.get("result") or body.get("output")
         img_ct = body.get("content_type", "image/png")
         if raw is None:
             _log.error("Callback for job %s had no image data", job_id)
-            set_image_job_failed(job_id, "Callback contained no image data")
+            set_image_job_failed(job_id, "Processing completed but returned no image data.")
             return {"ok": False}
 
         if isinstance(raw, str) and raw.startswith("http"):
@@ -285,7 +288,8 @@ async def image_job_complete(job_id: str, request: Request):
             return {"ok": False}
 
     if not result_pairs:
-        set_image_job_failed(job_id, "Callback contained no usable images")
+        _log.error("Callback for job %s had no usable images after discarding nulls", job_id)
+        set_image_job_failed(job_id, "Processing completed but returned no valid images.")
         return {"ok": False}
 
     # Upload results to GCS
