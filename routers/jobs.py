@@ -48,6 +48,17 @@ _log = logging.getLogger(__name__)
 _storage_client = None
 
 
+def _check_access(user: dict) -> None:
+    if "admin" in (user.get("roles") or []):
+        return
+    services = user.get("allowed_services") or []
+    if "abcd_analyzer" not in services:
+        raise HTTPException(
+            status_code=403,
+            detail="Your account does not have access to ABCD Analyzer. Contact an admin.",
+        )
+
+
 def _get_storage_client():
     global _storage_client
     if _storage_client is None:
@@ -173,6 +184,8 @@ async def create_job(
     current_user: dict = Depends(get_current_user),
 ) -> CreateJobResponse:
     """Create a new analysis job. One of youtube_url or video_url must be provided."""
+    _check_access(current_user)
+
     video_uri = request.youtube_url or request.video_url
     if not video_uri:
         raise HTTPException(
@@ -256,6 +269,8 @@ async def upload_job(
     current_user: dict = Depends(get_current_user),
 ) -> CreateJobResponse:
     """Create a new analysis job from an uploaded video file (GCS + ABCD)."""
+    _check_access(current_user)
+
     # Basic validation
     if not file.content_type or "mp4" not in file.content_type:
         raise HTTPException(status_code=400, detail="Only MP4 video uploads are supported.")
