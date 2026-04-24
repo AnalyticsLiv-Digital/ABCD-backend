@@ -304,6 +304,13 @@ async def me(current_user: dict = Depends(get_current_user)):
     return _user_public(current_user)
 
 
+@router.post("/refresh", response_model=Token)
+async def refresh_token(current_user: dict = Depends(get_current_user)):
+    """Issue a fresh token for an existing valid session. Call on app startup to extend the session."""
+    access_token = create_access_token(subject=current_user["email"])
+    return Token(access_token=access_token)
+
+
 @router.post("/request-access", status_code=202)
 async def request_access(payload: AccessRequestIn):
     """Store an access request; for now we log it and store in Mongo."""
