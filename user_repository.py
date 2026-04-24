@@ -156,3 +156,47 @@ def can_consume_run_and_increment(user: dict) -> bool:
     New code should use check_and_increment_service_usage() instead.
     """
     return check_and_increment_service_usage(user, "abcd_analyzer")
+
+
+def check_usage_with_org(user: dict, service_id: str) -> tuple[bool, str]:
+    """
+    Full usage check: org-level cap (outer) then user-level cap (inner).
+    Admins bypass both.
+
+    Returns (allowed: bool, error_message: str).
+    Increments both org and user counters atomically on success.
+    Rolls back org counter if user limit is hit.
+    """
+    roles = user.get("roles") or []
+    if "admin" in roles:
+        return True, ""
+
+    org_id = user.get("org_id")
+
+    # Check org-level cap first (outer boundary)
+    if org_id:
+        from org_repository import get_org_by_id, check_and_increment_org_usage, decrement_org_usage
+        org = get_org_by_id(org_id)
+        if org is not None:
+            if org.get("status") != "active":
+                return False, "Your organization's account is suspended. Contact your admin."
+            if not check_and_increment_org_usage(org, service_id):
+                return False, (
+                    "Your organization's monthly usage limit has been reached for this service. "
+                    "Contact your admin to increase the limit."
+                )
+            # Org passed — now check user limit. Roll back org if user is blocked.
+            if not check_and_increment_service_usage(user, service_id):
+                decrement_org_usage(org_id, service_id)
+                return False, (
+                    "Your personal monthly usage limit has been reached. "
+                    "Contact an admin to increase your limit."
+                )
+            return True, ""
+        # org_id set but org not found — treat as no-org user (org may have been deleted)
+
+    # No org — only user-level check
+    if not check_and_increment_service_usage(user, service_id):
+        return False, "Monthly usage limit reached. Contact an admin to increase your limit."
+
+    return True, ""

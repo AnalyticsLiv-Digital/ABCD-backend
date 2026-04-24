@@ -25,6 +25,7 @@ from org_repository import (
     create_org,
     create_invitation,
     get_org_by_id,
+    get_org_usage_history,
     list_orgs,
     list_org_invitations,
     update_org,
@@ -328,14 +329,30 @@ async def list_org_users(
             "id": str(u["_id"]),
             "email": u.get("email"),
             "display_name": u.get("display_name", ""),
+            "picture": u.get("picture", ""),
             "org_role": u.get("org_role", "member"),
             "auth_providers": u.get("auth_providers", ["password"]),
             "status": u.get("status", "active"),
+            "service_usage": u.get("service_usage", {}),
+            "service_limits": u.get("service_limits", {}),
+            "runs_this_period": u.get("runs_this_period", 0),
             "last_login_at": u["last_login_at"].isoformat() if u.get("last_login_at") else None,
-            "created_at": u["created_at"].isoformat() if u.get("created_at") else None,
+            "joined_at": u["created_at"].isoformat() if u.get("created_at") else None,
         }
         for u in users
     ]
+
+
+@router.get("/orgs/{org_id}/usage-history")
+async def get_organization_usage_history(
+    org_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """Platform admin: return month-by-month usage history for an org (newest first, up to 24 months)."""
+    _require_platform_admin(current_user)
+    if not get_org_by_id(org_id):
+        raise HTTPException(404, "Organization not found")
+    return get_org_usage_history(org_id)
 
 
 @router.patch("/orgs/{org_id}/users/{user_id}/status")

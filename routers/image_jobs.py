@@ -21,7 +21,7 @@ from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPExcepti
 
 from config import settings
 from gcs_utils import upload_bytes_to_gcs
-from user_repository import check_and_increment_service_usage
+from user_repository import check_usage_with_org
 from image_job_repository import (
     create_image_job_record,
     get_image_job,
@@ -180,11 +180,9 @@ async def create_image_job(
     """
     _check_access(current_user)
 
-    if not check_and_increment_service_usage(current_user, "creative_studio"):
-        raise HTTPException(
-            status_code=429,
-            detail="Monthly usage limit reached for Creative Studio. Contact an admin to increase your limit.",
-        )
+    allowed, reason = check_usage_with_org(current_user, "creative_studio")
+    if not allowed:
+        raise HTTPException(status_code=429, detail=reason)
 
     image_data = await image.read()
     if len(image_data) > 20 * 1024 * 1024:
