@@ -97,6 +97,7 @@ def update_org(org_id: str, updates: dict) -> bool:
 def check_and_increment_org_usage(org: dict, service_id: str) -> bool:
     """
     Atomically check org service limit and increment if allowed.
+    Saves a history snapshot before resetting on a new month.
     Returns True if the run is allowed (counter incremented).
     Returns False if the monthly limit is already reached.
     """
@@ -109,13 +110,28 @@ def check_and_increment_org_usage(org: dict, service_id: str) -> bool:
     limit = int((org.get("service_limits") or {}).get(service_id, DEFAULT_ORG_SERVICE_LIMIT))
 
     if new_month:
-        # Reset period first, then try to increment
+        # Save the previous month's snapshot before resetting
+        old_usage = org.get("service_usage") or {}
+        history_entry = {
+            "period": period_start.strftime("%Y-%m"),
+            "usage": {s: int(old_usage.get(s, 0)) for s in ALL_SERVICES},
+            "limits": {s: int((org.get("service_limits") or {}).get(s, DEFAULT_ORG_SERVICE_LIMIT)) for s in ALL_SERVICES},
+        }
         organizations_collection.update_one(
             {"_id": org["_id"]},
-            {"$set": {
-                "service_usage": {s: 0 for s in ALL_SERVICES},
-                "usage_period_start": now,
-            }},
+            {
+                "$set": {
+                    "service_usage": {s: 0 for s in ALL_SERVICES},
+                    "usage_period_start": now,
+                },
+                "$push": {
+                    "usage_history": {
+                        "$each": [history_entry],
+                        "$slice": -24,  # keep last 24 months
+                        "$sort": {"period": 1},
+                    }
+                },
+            },
         )
 
     # Atomic: only increment if current usage < limit
@@ -129,6 +145,30 @@ def check_and_increment_org_usage(org: dict, service_id: str) -> bool:
         return_document=True,
     )
     return result is not None
+
+
+def decrement_org_usage(org_id, service_id: str) -> None:
+    """Roll back an org usage increment (called when user-level check fails after org passed)."""
+    if not ObjectId.is_valid(org_id):
+        return
+    organizations_collection.update_one(
+        {"_id": ObjectId(org_id), f"service_usage.{service_id}": {"$gt": 0}},
+        {"$inc": {f"service_usage.{service_id}": -1}},
+    )
+
+
+def get_org_usage_history(org_id) -> list[dict]:
+    """Return stored monthly usage history for an org, newest first."""
+    if not ObjectId.is_valid(org_id):
+        return []
+    org = organizations_collection.find_one(
+        {"_id": ObjectId(org_id)},
+        {"usage_history": 1, "service_usage": 1, "service_limits": 1, "usage_period_start": 1},
+    )
+    if not org:
+        return []
+    history = list(reversed(org.get("usage_history") or []))
+    return history
 
 
 # ── Invitations ────────────────────────────────────────────────────────────────
