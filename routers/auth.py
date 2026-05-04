@@ -14,6 +14,7 @@ from user_repository import (
     DEFAULT_SERVICE_LIMIT,
     create_user,
     get_user_by_email,
+    is_usage_period_stale,
     list_users,
     update_user_services,
     update_user_service_limits,
@@ -119,13 +120,21 @@ def _user_public(user: dict) -> UserPublic:
     raw_usage = user.get("service_usage") or {}
     service_usage = {s: int(raw_usage.get(s, 0)) for s in ALL_SERVICES}
 
+    # Mask stale counters so display reflects the current calendar month only.
+    # Stored counters reset lazily on next run; until then, they hold last
+    # month's data and would inflate sums.
+    stale = is_usage_period_stale(user.get("usage_period_start"))
+    runs_this_period = 0 if stale else int(user.get("runs_this_period") or 0)
+    if stale:
+        service_usage = {s: 0 for s in ALL_SERVICES}
+
     org_id = user.get("org_id")
     return UserPublic(
         id=str(user["_id"]),
         email=user["email"],
         plan=user.get("plan") or "beta",
         max_runs_per_month=int(user.get("max_runs_per_month") or 0),
-        runs_this_period=int(user.get("runs_this_period") or 0),
+        runs_this_period=runs_this_period,
         is_admin=is_admin_user,
         is_platform_admin=bool(user.get("is_platform_admin")),
         org_id=str(org_id) if org_id else None,

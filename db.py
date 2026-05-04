@@ -17,6 +17,10 @@ resize_jobs_collection = _db["resize_jobs"]
 organizations_collection = _db["organizations"]
 invitations_collection = _db["invitations"]
 
+# Append-only audit log for platform-admin views into customer data.
+# Not exposed to agencies; queried directly by the dev team for spot checks.
+admin_audit_collection = _db["admin_audit_log"]
+
 
 def ensure_indexes():
     """Create indexes on startup. Safe to call multiple times (idempotent)."""
@@ -41,4 +45,8 @@ def ensure_indexes():
     jobs_collection.create_index([("user_email", ASCENDING), ("created_at", DESCENDING)])
     image_jobs_collection.create_index([("user_email", ASCENDING), ("created_at", DESCENDING)])
     resize_jobs_collection.create_index([("user_email", ASCENDING), ("created_at", DESCENDING)])
+
+    # Audit log — query by admin and by target user
+    admin_audit_collection.create_index([("admin_email", ASCENDING), ("at", DESCENDING)])
+    admin_audit_collection.create_index([("target_user_email", ASCENDING), ("at", DESCENDING)])
 

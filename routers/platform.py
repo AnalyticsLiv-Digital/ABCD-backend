@@ -11,10 +11,11 @@ Org admins (client-side admins) have their own separate endpoints at /org/*.
 """
 
 import logging
-from typing import Dict, List, Optional
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional
 
 from bson import ObjectId
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, EmailStr, Field
 
 from routers.auth import get_current_user
@@ -30,7 +31,21 @@ from org_repository import (
     list_org_invitations,
     update_org,
 )
-from db import users_collection, organizations_collection
+from user_repository import is_usage_period_stale
+from job_repository import (
+    get_job_admin as get_abcd_job_admin,
+    get_job_owner as get_abcd_job_owner,
+    list_jobs_admin as list_abcd_jobs_admin,
+)
+from image_job_repository import (
+    get_image_job_admin,
+    list_image_jobs_admin,
+)
+from resize_job_repository import (
+    get_resize_job_admin,
+    list_resize_jobs_admin,
+)
+from db import admin_audit_collection, users_collection, organizations_collection
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/platform", tags=["platform-admin"])
@@ -103,6 +118,13 @@ class InvitationResponse(BaseModel):
 def _org_response(org: dict) -> OrgResponse:
     org_id = org["_id"]
     user_count = users_collection.count_documents({"org_id": org_id})
+    # Mask stale counters: org's stored service_usage holds last month's data
+    # until any user in the org triggers a new run. See is_usage_period_stale.
+    raw_usage = org.get("service_usage") or {}
+    if is_usage_period_stale(org.get("usage_period_start")):
+        service_usage = {s: 0 for s in ALL_SERVICES}
+    else:
+        service_usage = {s: int(raw_usage.get(s, 0)) for s in ALL_SERVICES}
     return OrgResponse(
         id=str(org_id),
         name=org.get("name", ""),
@@ -111,7 +133,7 @@ def _org_response(org: dict) -> OrgResponse:
         status=org.get("status", "active"),
         allowed_services=org.get("allowed_services", []),
         service_limits=org.get("service_limits", {}),
-        service_usage=org.get("service_usage", {}),
+        service_usage=service_usage,
         allowed_domains=org.get("allowed_domains", []),
         created_at=org["created_at"].isoformat() if org.get("created_at") else None,
         user_count=user_count,
@@ -324,8 +346,12 @@ async def list_org_users(
         raise HTTPException(404, "Organization not found")
 
     users = list(users_collection.find({"org_id": ObjectId(org_id)}).sort("email", 1))
-    return [
-        {
+    out = []
+    for u in users:
+        stale = is_usage_period_stale(u.get("usage_period_start"))
+        service_usage = {s: 0 for s in ALL_SERVICES} if stale else (u.get("service_usage") or {})
+        runs_this_period = 0 if stale else int(u.get("runs_this_period") or 0)
+        out.append({
             "id": str(u["_id"]),
             "email": u.get("email"),
             "display_name": u.get("display_name", ""),
@@ -333,14 +359,13 @@ async def list_org_users(
             "org_role": u.get("org_role", "member"),
             "auth_providers": u.get("auth_providers", ["password"]),
             "status": u.get("status", "active"),
-            "service_usage": u.get("service_usage", {}),
+            "service_usage": service_usage,
             "service_limits": u.get("service_limits", {}),
-            "runs_this_period": u.get("runs_this_period", 0),
+            "runs_this_period": runs_this_period,
             "last_login_at": u["last_login_at"].isoformat() if u.get("last_login_at") else None,
             "joined_at": u["created_at"].isoformat() if u.get("created_at") else None,
-        }
-        for u in users
-    ]
+        })
+    return out
 
 
 @router.get("/orgs/{org_id}/usage-history")
@@ -377,3 +402,198 @@ async def update_org_user_status(
     if result.matched_count == 0:
         raise HTTPException(404, "User not found in this org")
     return {"detail": f"User status set to {new_status}"}
+
+
+# ── Cross-org job viewer (platform-admin only) ────────────────────────────────
+
+JOB_SERVICES = {"abcd", "studio", "resize"}
+
+
+def _audit(
+    admin_email: str,
+    action: str,
+    *,
+    service: Optional[str] = None,
+    job_id: Optional[str] = None,
+    target_user_email: Optional[str] = None,
+    target_org_id: Optional[str] = None,
+) -> None:
+    """Write a row to admin_audit_log. Silent — never raised, never visible to agencies."""
+    try:
+        admin_audit_collection.insert_one({
+            "admin_email": admin_email,
+            "action": action,
+            "service": service,
+            "job_id": job_id,
+            "target_user_email": target_user_email,
+            "target_org_id": str(target_org_id) if target_org_id else None,
+            "at": datetime.now(timezone.utc),
+        })
+    except Exception:
+        # Audit failures must not break the read.
+        logger.exception("Failed to write admin audit row")
+
+
+def _emails_for_org(org_id: ObjectId) -> List[str]:
+    """All user emails currently assigned to the org. Empty list if the org has no users."""
+    cur = users_collection.find({"org_id": org_id}, {"email": 1})
+    return [u["email"] for u in cur if u.get("email")]
+
+
+def _serialize_job_response(resp) -> Dict[str, Any]:
+    """JobResponse pydantic model → JSON-friendly dict."""
+    if resp is None:
+        return {}
+    return resp.model_dump(mode="json")
+
+
+@router.get("/orgs/{org_id}/jobs")
+async def list_org_jobs(
+    org_id: str,
+    service: Optional[str] = Query(None, description="abcd | studio | resize. If omitted, returns all three combined."),
+    user_id: Optional[str] = Query(None, description="Restrict to one user in the org."),
+    status_filter: Optional[str] = Query(None, alias="status", description="pending|running|processing|completed|failed"),
+    limit: int = Query(50, ge=1, le=200),
+    skip: int = Query(0, ge=0),
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Platform admin: list jobs across all users in an org.
+
+    Returned items carry a `service` discriminator so the UI can render a unified
+    table. When `service` is set, only that collection is queried; otherwise all
+    three are merged and re-sorted by created_at.
+    """
+    _require_platform_admin(current_user)
+    if service is not None and service not in JOB_SERVICES:
+        raise HTTPException(400, f"service must be one of {sorted(JOB_SERVICES)}")
+    if not ObjectId.is_valid(org_id):
+        raise HTTPException(404, "Organization not found")
+    org = get_org_by_id(org_id)
+    if not org:
+        raise HTTPException(404, "Organization not found")
+
+    # Resolve the target email set
+    if user_id is not None:
+        if not ObjectId.is_valid(user_id):
+            raise HTTPException(404, "User not found")
+        u = users_collection.find_one(
+            {"_id": ObjectId(user_id), "org_id": ObjectId(org_id)},
+            {"email": 1},
+        )
+        if not u or not u.get("email"):
+            raise HTTPException(404, "User not found in this org")
+        emails = [u["email"]]
+    else:
+        emails = _emails_for_org(ObjectId(org_id))
+
+    if not emails:
+        return {"jobs": [], "total": 0}
+
+    services_to_query = [service] if service else list(JOB_SERVICES)
+    combined: List[Dict[str, Any]] = []
+
+    if "abcd" in services_to_query:
+        for j in list_abcd_jobs_admin(emails, status=status_filter, limit=limit, skip=skip):
+            combined.append({**j, "service": "abcd"})
+    if "studio" in services_to_query:
+        for j in list_image_jobs_admin(emails, status=status_filter, limit=limit, skip=skip):
+            combined.append({**j, "service": "studio"})
+    if "resize" in services_to_query:
+        for j in list_resize_jobs_admin(emails, status=status_filter, limit=limit, skip=skip):
+            combined.append({**j, "service": "resize"})
+
+    # Stable ordering across services
+    combined.sort(key=lambda x: x.get("created_at") or "", reverse=True)
+    if not service:
+        combined = combined[:limit]
+
+    _audit(
+        admin_email=current_user.get("email", ""),
+        action="list_jobs",
+        service=service,
+        target_org_id=org["_id"],
+    )
+    return {"jobs": combined, "total": len(combined)}
+
+
+@router.get("/jobs/{service}/{job_id}")
+async def get_job_admin_detail(
+    service: str,
+    job_id: str,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Platform admin: full detail for a single job in any service.
+
+    Returns the same shape the user themselves would see for that service, plus
+    `user_email` and `service` so the UI can render context.
+    """
+    _require_platform_admin(current_user)
+    if service not in JOB_SERVICES:
+        raise HTTPException(400, f"service must be one of {sorted(JOB_SERVICES)}")
+
+    payload: Dict[str, Any]
+    owner_email: Optional[str]
+
+    if service == "abcd":
+        resp = get_abcd_job_admin(job_id)
+        if not resp:
+            raise HTTPException(404, "Job not found")
+        owner_email = get_abcd_job_owner(job_id)
+        payload = _serialize_job_response(resp)
+    elif service == "studio":
+        doc = get_image_job_admin(job_id)
+        if not doc:
+            raise HTTPException(404, "Job not found")
+        owner_email = doc.get("user_email")
+        payload = {
+            "job_id": doc["job_id"],
+            "status": doc["status"],
+            "created_at": doc["created_at"],
+            "completed_at": doc.get("completed_at"),
+            "prompt": doc.get("prompt"),
+            "original_filename": doc.get("original_filename"),
+            "original_url": doc.get("original_url"),
+            "result_urls": doc.get("result_urls") or [],
+            "error": doc.get("error"),
+        }
+    else:  # resize
+        doc = get_resize_job_admin(job_id)
+        if not doc:
+            raise HTTPException(404, "Job not found")
+        owner_email = doc.get("user_email")
+        payload = {
+            "job_id": doc["job_id"],
+            "status": doc["status"],
+            "created_at": doc["created_at"],
+            "completed_at": doc.get("completed_at"),
+            "original_filename": doc.get("original_filename"),
+            "original_url": doc.get("original_url"),
+            "sizes": doc.get("sizes") or [],
+            "max_size_kb": doc.get("max_size_kb"),
+            "result_urls": doc.get("result_urls") or [],
+            "result_images": doc.get("result_images") or [],
+            "error": doc.get("error"),
+        }
+
+    # Enrich with org context for the UI
+    target_org_id = None
+    if owner_email:
+        u = users_collection.find_one({"email": owner_email}, {"org_id": 1, "display_name": 1})
+        if u:
+            target_org_id = u.get("org_id")
+            payload["user_display_name"] = u.get("display_name") or ""
+
+    payload["service"] = service
+    payload["user_email"] = owner_email
+
+    _audit(
+        admin_email=current_user.get("email", ""),
+        action="view_job",
+        service=service,
+        job_id=job_id,
+        target_user_email=owner_email,
+        target_org_id=target_org_id,
+    )
+    return payload
