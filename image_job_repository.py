@@ -99,3 +99,48 @@ def list_image_jobs(user_email: str, limit: int = 50) -> List[Dict[str, Any]]:
             sort=[("created_at", -1)],
         ).limit(limit)
     )
+
+
+# ── Admin (platform-admin only) ──────────────────────────────────────────────
+
+def list_image_jobs_admin(
+    user_emails: List[str],
+    status: Optional[str] = None,
+    limit: int = 50,
+    skip: int = 0,
+) -> List[Dict[str, Any]]:
+    """List image jobs across the given set of user emails. Bypasses per-user scope."""
+    query: Dict[str, Any] = {"user_email": {"$in": user_emails}}
+    if status:
+        query["status"] = status
+    cursor = (
+        image_jobs_collection.find(query)
+        .sort("created_at", -1)
+        .skip(max(0, skip))
+        .limit(max(1, limit))
+    )
+    return [
+        {
+            "job_id": doc["job_id"],
+            "status": doc["status"],
+            "created_at": doc["created_at"],
+            "completed_at": doc.get("completed_at"),
+            "user_email": doc.get("user_email"),
+            "prompt": doc.get("prompt"),
+            "original_filename": doc.get("original_filename"),
+            "original_url": doc.get("original_url"),
+            "result_count": len(doc.get("result_urls") or []),
+            "error": doc.get("error"),
+        }
+        for doc in cursor
+    ]
+
+
+def get_image_job_admin(job_id: str) -> Optional[Dict[str, Any]]:
+    """Fetch a single image job by id, regardless of owner."""
+    return image_jobs_collection.find_one({"_id": job_id})
+
+
+def get_image_job_owner(job_id: str) -> Optional[str]:
+    doc = image_jobs_collection.find_one({"_id": job_id}, {"user_email": 1})
+    return doc.get("user_email") if doc else None

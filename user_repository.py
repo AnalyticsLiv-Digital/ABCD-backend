@@ -24,6 +24,26 @@ def verify_password(plain_password: str, password_hash: str) -> bool:
     return pwd_context.verify(plain_password, password_hash)
 
 
+def is_usage_period_stale(period_start) -> bool:
+    """
+    True if a stored usage counter belongs to a previous calendar month.
+
+    Counter resets are lazy — they only happen when the entity (user or org)
+    next attempts a run. For inactive users/orgs, the stored counter still
+    reflects last month's data. Display-layer code must mask those values
+    so totals are consistent across users/orgs/period boundaries.
+    """
+    if not period_start:
+        return False
+    if isinstance(period_start, str):
+        try:
+            period_start = datetime.fromisoformat(period_start)
+        except ValueError:
+            return False
+    now = datetime.now(timezone.utc)
+    return period_start.year != now.year or period_start.month != now.month
+
+
 def get_user_by_email(email: str) -> Optional[dict]:
     return users_collection.find_one({"email": email.lower().strip()})
 

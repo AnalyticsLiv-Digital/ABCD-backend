@@ -137,3 +137,51 @@ def list_job_summaries(user_email: str, limit: int = 20) -> List[JobSummary]:
         )
     return summaries
 
+
+# ── Admin (platform-admin only) ──────────────────────────────────────────────
+
+def list_jobs_admin(
+    user_emails: List[str],
+    status: Optional[str] = None,
+    limit: int = 50,
+    skip: int = 0,
+) -> List[Dict[str, Any]]:
+    """List ABCD jobs across the given set of user emails. Bypasses per-user scope."""
+    query: Dict[str, Any] = {"user_email": {"$in": user_emails}}
+    if status:
+        query["status"] = status
+    cursor = (
+        jobs_collection.find(query)
+        .sort("created_at", -1)
+        .skip(max(0, skip))
+        .limit(max(1, limit))
+    )
+    return [
+        {
+            "job_id": doc["job_id"],
+            "status": doc["status"],
+            "created_at": doc["created_at"],
+            "completed_at": doc.get("completed_at"),
+            "user_email": doc.get("user_email"),
+            "brand_name": doc.get("brand_name"),
+            "campaign_name": doc.get("campaign_name"),
+            "video_identifier": doc.get("video_identifier"),
+            "error": doc.get("error"),
+        }
+        for doc in cursor
+    ]
+
+
+def get_job_admin(job_id: str) -> Optional[JobResponse]:
+    """Fetch a single ABCD job by id, regardless of owner."""
+    doc = jobs_collection.find_one({"_id": job_id})
+    if not doc:
+        return None
+    return _build_job_response(doc)
+
+
+def get_job_owner(job_id: str) -> Optional[str]:
+    """Return the user_email that owns a job, for audit logging."""
+    doc = jobs_collection.find_one({"_id": job_id}, {"user_email": 1})
+    return doc.get("user_email") if doc else None
+
