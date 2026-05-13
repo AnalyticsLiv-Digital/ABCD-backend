@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python -c \"import ast; [ast.parse\\(open\\(p, encoding='utf-8'\\).read\\(\\)\\) for p in ['config.py','db.py','main.py','user_repository.py','org_repository.py','email_service.py','creatives_job_repository.py','routers/auth.py','routers/platform.py','routers/creatives_jobs.py','routers/image_jobs.py']]; print\\('OK: all Python files parse'\\)\")",
+      "Bash(where py *)",
+      "Bash(where python *)",
+      "Bash(where uvicorn *)"
+    ]
+  }
+}

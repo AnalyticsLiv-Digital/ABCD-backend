@@ -83,6 +83,11 @@ class Settings:
         "N8N_RESIZE_WEBHOOK_URL",
         "https://n8n.analyticsliv.com/webhook/Ad-lens-final-prod",
     )
+    # Creatives – aspect-ratio agent via n8n (admin-only by default)
+    N8N_CREATIVES_WEBHOOK_URL: str = os.getenv(
+        "N8N_CREATIVES_WEBHOOK_URL",
+        "https://n8n.analyticsliv.com/webhook/Aspect-ratio-agent",
+    )
     # Max output file size hint passed to the n8n resize workflow (in KB)
     N8N_RESIZE_MAX_SIZE_KB: int = int(os.getenv("N8N_RESIZE_MAX_SIZE_KB", "999000"))
 

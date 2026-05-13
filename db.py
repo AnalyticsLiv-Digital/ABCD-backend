@@ -12,6 +12,7 @@ users_collection = _db["users"]
 access_requests_collection = _db["access_requests"]
 image_jobs_collection = _db["image_jobs"]
 resize_jobs_collection = _db["resize_jobs"]
+creatives_jobs_collection = _db["creatives_jobs"]
 
 # Multi-tenancy collections
 organizations_collection = _db["organizations"]
@@ -45,6 +46,7 @@ def ensure_indexes():
     jobs_collection.create_index([("user_email", ASCENDING), ("created_at", DESCENDING)])
     image_jobs_collection.create_index([("user_email", ASCENDING), ("created_at", DESCENDING)])
     resize_jobs_collection.create_index([("user_email", ASCENDING), ("created_at", DESCENDING)])
+    creatives_jobs_collection.create_index([("user_email", ASCENDING), ("created_at", DESCENDING)])
 
     # Audit log — query by admin and by target user
     admin_audit_collection.create_index([("admin_email", ASCENDING), ("at", DESCENDING)])
