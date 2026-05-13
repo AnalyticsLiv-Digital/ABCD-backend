@@ -23,7 +23,7 @@ from bson import ObjectId
 
 from db import invitations_collection, organizations_collection, users_collection
 
-ALL_SERVICES = ["abcd_analyzer", "creative_studio", "creative_resize"]
+ALL_SERVICES = ["abcd_analyzer", "creative_studio", "creative_resize", "creatives"]
 DEFAULT_ORG_SERVICE_LIMIT = 50  # runs/month per service for a new org
 
 

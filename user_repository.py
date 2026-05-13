@@ -12,7 +12,7 @@ from db import users_collection
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
 # Services tracked for per-module usage
-ALL_SERVICES = ["abcd_analyzer", "creative_studio", "creative_resize"]
+ALL_SERVICES = ["abcd_analyzer", "creative_studio", "creative_resize", "creatives"]
 DEFAULT_SERVICE_LIMIT = 20
 
 
