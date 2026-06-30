@@ -147,6 +147,42 @@ def check_and_increment_org_usage(org: dict, service_id: str) -> bool:
     return result is not None
 
 
+def reset_org_period_if_stale(org: dict) -> None:
+    """
+    If the org's usage counters belong to a previous calendar month, save a history
+    snapshot and reset them to zero. No-op if the period is current.
+    Mirrors the reset logic inside check_and_increment_org_usage.
+    """
+    now = datetime.now(timezone.utc)
+    period_start = org.get("usage_period_start") or now
+    if isinstance(period_start, str):
+        period_start = datetime.fromisoformat(period_start)
+    if period_start.year == now.year and period_start.month == now.month:
+        return
+    old_usage = org.get("service_usage") or {}
+    history_entry = {
+        "period": period_start.strftime("%Y-%m"),
+        "usage": {s: int(old_usage.get(s, 0)) for s in ALL_SERVICES},
+        "limits": {s: int((org.get("service_limits") or {}).get(s, DEFAULT_ORG_SERVICE_LIMIT)) for s in ALL_SERVICES},
+    }
+    organizations_collection.update_one(
+        {"_id": org["_id"]},
+        {
+            "$set": {
+                "service_usage": {s: 0 for s in ALL_SERVICES},
+                "usage_period_start": now,
+            },
+            "$push": {
+                "usage_history": {
+                    "$each": [history_entry],
+                    "$slice": -24,
+                    "$sort": {"period": 1},
+                }
+            },
+        },
+    )
+
+
 def decrement_org_usage(org_id, service_id: str) -> None:
     """Roll back an org usage increment (called when user-level check fails after org passed)."""
     if not ObjectId.is_valid(org_id):

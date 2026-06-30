@@ -170,6 +170,30 @@ def check_and_increment_service_usage(user: dict, service_id: str) -> bool:
     return True
 
 
+def reset_usage_period_if_stale(user: dict) -> dict:
+    """
+    If the user's usage counters belong to a previous calendar month, reset them
+    to zero in the DB and return the patched user dict. No-op if period is current.
+    """
+    if not is_usage_period_stale(user.get("usage_period_start")):
+        return user
+    now = datetime.now(timezone.utc)
+    users_collection.update_one(
+        {"_id": user["_id"]},
+        {"$set": {
+            "service_usage": {s: 0 for s in ALL_SERVICES},
+            "runs_this_period": 0,
+            "usage_period_start": now,
+        }},
+    )
+    return {
+        **user,
+        "service_usage": {s: 0 for s in ALL_SERVICES},
+        "runs_this_period": 0,
+        "usage_period_start": now,
+    }
+
+
 def can_consume_run_and_increment(user: dict) -> bool:
     """
     Legacy global limit check — kept for backward compat.

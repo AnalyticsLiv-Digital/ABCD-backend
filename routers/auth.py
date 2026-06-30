@@ -16,12 +16,14 @@ from user_repository import (
     get_user_by_email,
     is_usage_period_stale,
     list_users,
+    reset_usage_period_if_stale,
     update_user_services,
     update_user_service_limits,
     verify_password,
 )
 from org_repository import (
     get_org_by_id,
+    reset_org_period_if_stale,
     resolve_org_for_google_user,
     accept_invitation,
     get_pending_invite_for_email,
@@ -309,8 +311,12 @@ async def google_login(body: GoogleLoginBody):
 
 @router.get("/me", response_model=UserPublic)
 async def me(current_user: dict = Depends(get_current_user)):
-    """Return current user's profile and usage."""
-    return _user_public(current_user)
+    """Return current user's profile and usage, eagerly resetting stale period counters."""
+    user = reset_usage_period_if_stale(current_user)
+    org = user.get("_org")
+    if org:
+        reset_org_period_if_stale(org)
+    return _user_public(user)
 
 
 @router.post("/refresh", response_model=Token)
