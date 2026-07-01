@@ -9,7 +9,7 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
-RUN git clone --depth 1 https://github.com/google-marketing-solutions/abcds-detector.git abcd_original
+RUN git clone --depth 1 https://github.com/AnalyticsLiv-Digital/abcds-detector abcd_original
 
 ENV PYTHONUNBUFFERED=1
 ENV PORT=8080
