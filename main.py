@@ -65,6 +65,12 @@ app.include_router(jobs_router)
 app.include_router(public_router)
 
 
+@app.get("/")
+def root():
+    """Simple root endpoint to make the service reachable via browser/curl."""
+    return {"status": "ok", "service": "abcd-detector-api", "message": "ABCD Detector API is running."}
+
+
 @app.get("/health")
 def health():
     """Liveness/readiness for local runs and future deployment."""
