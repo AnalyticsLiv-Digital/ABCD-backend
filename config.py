@@ -68,6 +68,8 @@ class Settings:
     # Mock job delay in seconds (used when USE_REAL_ABCD is False)
     MOCK_JOB_DELAY_SECONDS: float = float(os.getenv("MOCK_JOB_DELAY_SECONDS", "2.0"))
 
+    ABCD_EXTRACT_BRAND_METADATA: bool = True
+
     # Creative Studio – image enhancement via n8n
     # The n8n webhook is called server-side (background thread), so no CORS or timeout issues.
     N8N_IMAGE_WEBHOOK_URL: str = os.getenv("N8N_IMAGE_WEBHOOK_URL", "https://n8n.analyticsliv.com/webhook/Aspect-ratio-agent")
