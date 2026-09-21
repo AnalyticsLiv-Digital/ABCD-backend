@@ -17,14 +17,13 @@ Payload sent TO n8n (multipart/form-data):
   - data         : original image file (field name "data")
   - sizes        : JSON string — [{"name":"1200x628","width":1200,"height":628}, …]
   - max_size_kb  : integer string (e.g. "999000")
-  - email        : user email
 """
 import base64
 import hmac
 import io
 import json
 import logging
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, HTTPException, Request, UploadFile
 
@@ -102,7 +101,6 @@ def _process(
     image_data: bytes,
     content_type: str,
     filename: str,
-    user_email: str,
     sizes: List[Dict[str, Any]],
     max_size_kb: int,
 ) -> None:
@@ -137,7 +135,6 @@ def _process(
             data={
                 "sizes":       json.dumps(sizes),
                 "max_size_kb": str(max_size_kb),
-                "email":       user_email,
             },
             timeout=N8N_TIMEOUT_SECONDS,
         )
@@ -390,7 +387,6 @@ async def create_resize_job(
     image: UploadFile = File(...),
     sizes: str = Form(...),            # JSON string: [{"name":"…","width":W,"height":H}, …]
     max_size_kb: int = Form(999000),
-    email: Optional[str] = Form(None), # notification email; defaults to authenticated user's email
     current_user: dict = Depends(get_current_user),
 ):
     """
@@ -401,7 +397,6 @@ async def create_resize_job(
        {"name":"1200x1200","width":1200,"height":1200}]
 
     max_size_kb: maximum output file size in KB (default 999000 = ~1 GB, effectively unlimited)
-    email: notification / delivery email (defaults to authenticated user's email if omitted)
     """
     _check_access(current_user)
 
@@ -419,9 +414,6 @@ async def create_resize_job(
                 raise ValueError(f"Each size must have integer width and height: {s}")
     except (json.JSONDecodeError, ValueError) as exc:
         raise HTTPException(400, f"Invalid sizes parameter: {exc}")
-
-    # Resolve notification email — user-supplied value or fall back to authenticated email
-    notify_email = (email or "").strip() or current_user["email"]
 
     image_data = await image.read()
     if len(image_data) > 20 * 1024 * 1024:
@@ -443,7 +435,6 @@ async def create_resize_job(
         image_data,
         content_type,
         safe_filename,
-        notify_email,
         sizes_list,
         max_size_kb,
     )
