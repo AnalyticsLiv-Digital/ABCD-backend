@@ -205,6 +205,13 @@ def _process(job_id: str, prompt: str, aspect_ratio: str, callback_url: str) -> 
             set_prompt_creative_job_failed(job_id, "Creative generation service is unreachable. Try again later.")
             return
 
+        if resp.status_code in (502, 503, 504, 524):
+            # A proxy in front of n8n gave up waiting for a synchronous answer — the run
+            # continues in n8n and the callback will still deliver the images.
+            _log.warning("Gateway timeout (HTTP %s) for prompt creative job %s — waiting for callback",
+                         resp.status_code, job_id)
+            set_prompt_creative_job_processing(job_id)
+            return
         if resp.status_code in (401, 403):
             _log.error("n8n rejected auth for prompt creative job %s (HTTP %s)", job_id, resp.status_code)
             set_prompt_creative_job_failed(job_id, "Creative generation service rejected the request (auth).")
