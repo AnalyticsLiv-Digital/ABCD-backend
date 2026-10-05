@@ -53,7 +53,7 @@ class UserCreate(UserBase):
     max_runs_per_month: int = 20
 
 
-VALID_SERVICES = {"abcd_analyzer", "creative_studio", "creative_resize", "creatives"}
+VALID_SERVICES = {"abcd_analyzer", "creative_studio", "creative_resize", "creatives", "prompt_creative"}
 
 
 class UserPublic(UserBase):
