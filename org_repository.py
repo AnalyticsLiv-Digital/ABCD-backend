@@ -134,12 +134,17 @@ def check_and_increment_org_usage(org: dict, service_id: str) -> bool:
             },
         )
 
-    # Atomic: only increment if current usage < limit
+    # Atomic: only increment if current usage < limit.
+    # A missing counter (service added after the org's period started) counts as 0 —
+    # $lt never matches a missing field, which would block the new service until next month.
     result = organizations_collection.find_one_and_update(
         {
             "_id": org["_id"],
             "status": "active",
-            f"service_usage.{service_id}": {"$lt": limit},
+            "$or": [
+                {f"service_usage.{service_id}": {"$lt": limit}},
+                {f"service_usage.{service_id}": {"$exists": False}},
+            ],
         },
         {"$inc": {f"service_usage.{service_id}": 1}},
         return_document=True,
