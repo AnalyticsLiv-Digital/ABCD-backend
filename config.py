@@ -90,6 +90,16 @@ class Settings:
         "N8N_CREATIVES_WEBHOOK_URL",
         "https://n8n.analyticsliv.com/webhook/Aspect-ratio-agent",
     )
+    # Prompt Creative – brand RAG text-to-image via n8n ("Brand RAG Image Generation" workflow)
+    N8N_PROMPT_CREATIVE_WEBHOOK_URL: str = os.getenv(
+        "N8N_PROMPT_CREATIVE_WEBHOOK_URL",
+        "https://n8n.analyticsliv.com/webhook/generate-image",
+    )
+    # The workflow's Webhook node uses Header Auth — set the header name/value from that n8n credential.
+    N8N_PROMPT_CREATIVE_AUTH_HEADER: str = os.getenv("N8N_PROMPT_CREATIVE_AUTH_HEADER", "")
+    N8N_PROMPT_CREATIVE_AUTH_VALUE: str = os.getenv("N8N_PROMPT_CREATIVE_AUTH_VALUE", "")
+    # Jobs still processing after this many minutes are marked failed (n8n errored without calling back)
+    PROMPT_CREATIVE_TIMEOUT_MINUTES: int = int(os.getenv("PROMPT_CREATIVE_TIMEOUT_MINUTES", "15"))
     # Max output file size hint passed to the n8n resize workflow (in KB)
     N8N_RESIZE_MAX_SIZE_KB: int = int(os.getenv("N8N_RESIZE_MAX_SIZE_KB", "999000"))
 
