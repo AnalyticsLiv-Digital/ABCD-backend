@@ -49,12 +49,16 @@ from creatives_job_repository import (
     get_creatives_job_admin,
     list_creatives_jobs_admin,
 )
+from prompt_creative_job_repository import (
+    get_prompt_creative_job_admin,
+    list_prompt_creative_jobs_admin,
+)
 from db import admin_audit_collection, users_collection, organizations_collection
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/platform", tags=["platform-admin"])
 
-VALID_SERVICES = {"abcd_analyzer", "creative_studio", "creative_resize", "creatives"}
+VALID_SERVICES = {"abcd_analyzer", "creative_studio", "creative_resize", "creatives", "prompt_creative"}
 VALID_PLANS = {"starter", "pro", "enterprise"}
 
 
@@ -410,7 +414,7 @@ async def update_org_user_status(
 
 # ── Cross-org job viewer (platform-admin only) ────────────────────────────────
 
-JOB_SERVICES = {"abcd", "studio", "resize", "creatives"}
+JOB_SERVICES = {"abcd", "studio", "resize", "creatives", "prompt"}
 
 
 def _audit(
@@ -509,6 +513,9 @@ async def list_org_jobs(
     if "creatives" in services_to_query:
         for j in list_creatives_jobs_admin(emails, status=status_filter, limit=limit, skip=skip):
             combined.append({**j, "service": "creatives"})
+    if "prompt" in services_to_query:
+        for j in list_prompt_creative_jobs_admin(emails, status=status_filter, limit=limit, skip=skip):
+            combined.append({**j, "service": "prompt"})
 
     # Stable ordering across services
     combined.sort(key=lambda x: x.get("created_at") or "", reverse=True)
@@ -581,6 +588,21 @@ async def get_job_admin_detail(
             "max_size_kb": doc.get("max_size_kb"),
             "result_urls": doc.get("result_urls") or [],
             "result_images": doc.get("result_images") or [],
+            "error": doc.get("error"),
+        }
+    elif service == "prompt":
+        doc = get_prompt_creative_job_admin(job_id)
+        if not doc:
+            raise HTTPException(404, "Job not found")
+        owner_email = doc.get("user_email")
+        payload = {
+            "job_id": doc["job_id"],
+            "status": doc["status"],
+            "created_at": doc["created_at"],
+            "completed_at": doc.get("completed_at"),
+            "prompt": doc.get("prompt"),
+            "aspect_ratio": doc.get("aspect_ratio"),
+            "result_urls": doc.get("result_urls") or [],
             "error": doc.get("error"),
         }
     else:  # creatives
