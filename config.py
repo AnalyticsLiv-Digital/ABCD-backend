@@ -79,6 +79,11 @@ class Settings:
     # MUST be set when running locally (e.g. via ngrok) so n8n can reach it.
     # Example: https://abc123.ngrok.io  or  https://your-cloud-run-url
     BACKEND_PUBLIC_URL: str = os.getenv("BACKEND_PUBLIC_URL", "")
+    # Studio jobs still pending/processing after this many minutes are marked failed
+    # (n8n errored without calling back, or a batch upload never arrived).
+    IMAGE_JOB_TIMEOUT_MINUTES: int = int(os.getenv("IMAGE_JOB_TIMEOUT_MINUTES", "20"))
+    # Max images per Creative Studio batch (keep in sync with MAX_FILES in ImageCreatorPage.jsx)
+    IMAGE_BATCH_MAX_FILES: int = int(os.getenv("IMAGE_BATCH_MAX_FILES", "5"))
 
     # Creative Resize – image resizing via n8n
     N8N_RESIZE_WEBHOOK_URL: str = os.getenv(

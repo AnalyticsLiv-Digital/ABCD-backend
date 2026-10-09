@@ -8,12 +8,17 @@ Async callback pattern (no 504):
   4. POST /image-jobs/{id}/complete → receives results, uploads to GCS, marks completed
   5. GET  /image-jobs/{id}    → poll until status = completed | failed
   6. GET  /image-jobs         → list user's history
+  7. POST /image-jobs/{id}/retry → re-run a failed job from its stored original
+
+Multi-image batches live in routers/image_batches.py and reuse _process() below,
+so n8n always receives exactly one image per call.
 """
 import base64
 import hashlib
 import hmac
 import io
 import logging
+from datetime import datetime, timedelta
 from typing import List, Optional
 from urllib.parse import urlencode, urlparse, urlunparse, parse_qs
 
@@ -26,8 +31,10 @@ from image_job_repository import (
     create_image_job_record,
     get_image_job,
     list_image_jobs,
+    reset_image_job_for_retry,
     set_image_job_completed,
     set_image_job_failed,
+    set_image_job_failed_if_in_flight,
     set_image_job_processing,
     update_original_url,
 )
@@ -68,7 +75,47 @@ def _to_response(doc: dict) -> dict:
         "original_url":      doc.get("original_url"),
         "result_urls":       doc.get("result_urls") or [],
         "error":             doc.get("error"),
+        # Batch fields — None / True for single (legacy) jobs
+        "batch_id":          doc.get("batch_id"),
+        "upload_received":   doc.get("upload_received", True),
     }
+
+
+def _callback_url(request: Request, job_id: str) -> str:
+    """
+    Build the n8n callback URL. Prefer BACKEND_PUBLIC_URL (required for local dev since
+    n8n is external and cannot reach localhost). Falls back to request.base_url
+    for cloud deployments where the ingress URL is already correct.
+    """
+    if settings.BACKEND_PUBLIC_URL:
+        base = settings.BACKEND_PUBLIC_URL.rstrip("/")
+    else:
+        base = str(request.base_url).rstrip("/")
+    return f"{base}/image-jobs/{job_id}/complete"
+
+
+def _expire_if_stale(doc: Optional[dict]) -> Optional[dict]:
+    """
+    n8n only calls back on success — if the workflow errors (or a batch upload never
+    arrives) the job would stay in flight forever. Fail jobs that have been in flight
+    longer than IMAGE_JOB_TIMEOUT_MINUTES. A late callback still completes the job.
+    """
+    if not doc or doc.get("status") not in ("pending", "processing"):
+        return doc
+    started = doc.get("dispatched_at") or doc.get("created_at")
+    try:
+        started_at = datetime.strptime(started, "%Y-%m-%dT%H:%M:%SZ")
+    except (TypeError, ValueError):
+        return doc
+    if datetime.utcnow() - started_at <= timedelta(minutes=settings.IMAGE_JOB_TIMEOUT_MINUTES):
+        return doc
+    if doc.get("upload_received") is False:
+        error = "Upload did not complete — please submit this image again."
+    else:
+        error = "Enhancement timed out — the image service did not return a result. Please retry."
+    if set_image_job_failed_if_in_flight(doc["job_id"], error):
+        doc = {**doc, "status": "failed", "error": error}
+    return doc
 
 
 # ── Background worker ─────────────────────────────────────────────────────────
@@ -80,6 +127,7 @@ def _process(
     filename: str,
     prompt: str,
     callback_url: str,
+    store_original: bool = True,
 ) -> None:
     """
     Runs in FastAPI's thread pool — response has already been sent.
@@ -90,15 +138,16 @@ def _process(
          n8n must respond immediately (via "Respond to Webhook" node) — actual processing
          happens asynchronously inside n8n, which then POSTs results to callback_url.
     """
-    # 1. Upload original to GCS
-    ext = (content_type.split("/")[-1].split(";")[0] or "jpg")[:10]
-    try:
-        original_url = upload_bytes_to_gcs(
-            image_data, f"image_jobs/{job_id}/original.{ext}", content_type
-        )
-        update_original_url(job_id, original_url)
-    except Exception as exc:
-        _log.warning("Original GCS upload failed for job %s (non-fatal): %s", job_id, exc)
+    # 1. Upload original to GCS (skipped on retry — it is already stored)
+    if store_original:
+        ext = (content_type.split("/")[-1].split(";")[0] or "jpg")[:10]
+        try:
+            original_url = upload_bytes_to_gcs(
+                image_data, f"image_jobs/{job_id}/original.{ext}", content_type
+            )
+            update_original_url(job_id, original_url)
+        except Exception as exc:
+            _log.warning("Original GCS upload failed for job %s (non-fatal): %s", job_id, exc)
 
     # 2. Call n8n (expect immediate ack, not final result)
     if not settings.N8N_IMAGE_WEBHOOK_URL:
@@ -197,14 +246,7 @@ async def create_image_job(
         original_filename=safe_filename,
     )
 
-    # Build callback URL. Prefer BACKEND_PUBLIC_URL (required for local dev since
-    # n8n is external and cannot reach localhost). Falls back to request.base_url
-    # for cloud deployments where the ingress URL is already correct.
-    if settings.BACKEND_PUBLIC_URL:
-        base = settings.BACKEND_PUBLIC_URL.rstrip("/")
-    else:
-        base = str(request.base_url).rstrip("/")
-    callback_url = f"{base}/image-jobs/{job_id}/complete"
+    callback_url = _callback_url(request, job_id)
 
     background_tasks.add_task(
         _process,
@@ -318,7 +360,62 @@ async def list_image_jobs_endpoint(
     """List the current user's image enhancement history (most recent first)."""
     _check_access(current_user)
     docs = list_image_jobs(current_user["email"], limit=min(limit, 100))
-    return [_to_response(d) for d in docs]
+    return [_to_response(_expire_if_stale(d)) for d in docs]
+
+
+@router.post("/{job_id}/retry")
+def retry_image_job(
+    job_id: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    current_user: dict = Depends(get_current_user),
+):
+    """
+    Re-run a failed job using its stored original (no re-upload). Costs one run.
+    Sync def on purpose: the original is fetched with blocking I/O in the thread pool.
+    """
+    import requests as _req
+
+    _check_access(current_user)
+    email = current_user["email"]
+    doc = get_image_job(job_id, email)
+    if not doc:
+        raise HTTPException(404, "Job not found")
+    if doc.get("status") != "failed":
+        raise HTTPException(409, "Only failed images can be retried.")
+    if not doc.get("original_url"):
+        raise HTTPException(409, "The original image was not stored, so it can't be retried. Please upload it again.")
+
+    # Fetch the original first — no side effects if storage is unavailable.
+    try:
+        r = _req.get(doc["original_url"], timeout=60)
+        r.raise_for_status()
+    except Exception as exc:
+        _log.error("Retry: could not fetch original for job %s: %s", job_id, exc)
+        raise HTTPException(502, "Could not load the original image from storage. Try again shortly.")
+    image_data = r.content
+    content_type = r.headers.get("content-type", "image/jpeg").split(";")[0].strip()
+
+    previous_error = doc.get("error") or "Processing failed"
+    if not reset_image_job_for_retry(job_id, email):
+        raise HTTPException(409, "This image is already being retried.")
+
+    allowed, reason = check_usage_with_org(current_user, "creative_studio")
+    if not allowed:
+        set_image_job_failed(job_id, previous_error)  # restore the job as it was
+        raise HTTPException(status_code=429, detail=reason)
+
+    background_tasks.add_task(
+        _process,
+        job_id,
+        image_data,
+        content_type,
+        doc.get("original_filename") or "image.jpg",
+        doc.get("prompt") or "",
+        _callback_url(request, job_id),
+        False,  # store_original — already in GCS
+    )
+    return _to_response(get_image_job(job_id, email))
 
 
 @router.get("/{job_id}/results/{image_index}/download")
@@ -375,4 +472,4 @@ async def get_image_job_endpoint(
     doc = get_image_job(job_id, current_user["email"])
     if not doc:
         raise HTTPException(404, "Job not found")
-    return _to_response(doc)
+    return _to_response(_expire_if_stale(doc))

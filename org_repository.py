@@ -94,12 +94,13 @@ def update_org(org_id: str, updates: dict) -> bool:
     return result.matched_count > 0
 
 
-def check_and_increment_org_usage(org: dict, service_id: str) -> bool:
+def check_and_increment_org_usage(org: dict, service_id: str, count: int = 1) -> bool:
     """
     Atomically check org service limit and increment if allowed.
     Saves a history snapshot before resetting on a new month.
     Returns True if the run is allowed (counter incremented).
     Returns False if the monthly limit is already reached.
+    count: number of runs to consume at once (batch submits). All-or-nothing.
     """
     now = datetime.now(timezone.utc)
     period_start = org.get("usage_period_start") or now
@@ -137,16 +138,18 @@ def check_and_increment_org_usage(org: dict, service_id: str) -> bool:
     # Atomic: only increment if current usage < limit.
     # A missing counter (service added after the org's period started) counts as 0 —
     # $lt never matches a missing field, which would block the new service until next month.
+    # For count > 1 the whole batch must fit: usage + count <= limit  ⇔  usage < limit - count + 1.
+    # (count == 1 yields exactly the original single-run filter.)
+    within_limit = [{f"service_usage.{service_id}": {"$lt": limit - count + 1}}]
+    if count == 1 or count <= limit:
+        within_limit.append({f"service_usage.{service_id}": {"$exists": False}})
     result = organizations_collection.find_one_and_update(
         {
             "_id": org["_id"],
             "status": "active",
-            "$or": [
-                {f"service_usage.{service_id}": {"$lt": limit}},
-                {f"service_usage.{service_id}": {"$exists": False}},
-            ],
+            "$or": within_limit,
         },
-        {"$inc": {f"service_usage.{service_id}": 1}},
+        {"$inc": {f"service_usage.{service_id}": count}},
         return_document=True,
     )
     return result is not None
@@ -188,13 +191,13 @@ def reset_org_period_if_stale(org: dict) -> None:
     )
 
 
-def decrement_org_usage(org_id, service_id: str) -> None:
+def decrement_org_usage(org_id, service_id: str, count: int = 1) -> None:
     """Roll back an org usage increment (called when user-level check fails after org passed)."""
     if not ObjectId.is_valid(org_id):
         return
     organizations_collection.update_one(
-        {"_id": ObjectId(org_id), f"service_usage.{service_id}": {"$gt": 0}},
-        {"$inc": {f"service_usage.{service_id}": -1}},
+        {"_id": ObjectId(org_id), f"service_usage.{service_id}": {"$gte": count}},
+        {"$inc": {f"service_usage.{service_id}": -count}},
     )
 
 

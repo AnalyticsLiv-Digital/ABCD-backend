@@ -105,7 +105,7 @@ def list_users(skip: int = 0, limit: int = 200) -> List[dict]:
     return list(users_collection.find({}, sort=[("email", 1)]).skip(skip).limit(limit))
 
 
-def check_and_increment_service_usage(user: dict, service_id: str) -> bool:
+def check_and_increment_service_usage(user: dict, service_id: str, count: int = 1) -> bool:
     """
     Check per-module usage limit for a user and increment if allowed.
 
@@ -114,6 +114,8 @@ def check_and_increment_service_usage(user: dict, service_id: str) -> bool:
     - Monthly reset: if the current calendar month differs from usage_period_start,
       all service_usage counters reset to 0 before checking.
     - Limit source: user.service_limits[service_id], defaults to DEFAULT_SERVICE_LIMIT (20).
+
+    count: number of runs to consume at once (batch submits). All-or-nothing.
 
     Returns True if the action is allowed (and counter was incremented).
     Returns False if the limit is already reached.
@@ -141,12 +143,12 @@ def check_and_increment_service_usage(user: dict, service_id: str) -> bool:
     service_limits = user.get("service_limits") or {}
     limit = int(service_limits.get(service_id, DEFAULT_SERVICE_LIMIT))
 
-    if current_usage >= limit:
+    if current_usage + count > limit:
         return False
 
     # Increment
-    new_usage = current_usage + 1
-    total_runs = new_usage if new_period else (int(user.get("runs_this_period") or 0) + 1)
+    new_usage = current_usage + count
+    total_runs = new_usage if new_period else (int(user.get("runs_this_period") or 0) + count)
 
     if new_period:
         # Reset all service counters, set only this one to 1
@@ -162,8 +164,8 @@ def check_and_increment_service_usage(user: dict, service_id: str) -> bool:
         users_collection.update_one(
             {"_id": user["_id"]},
             {"$inc": {
-                f"service_usage.{service_id}": 1,
-                "runs_this_period": 1,
+                f"service_usage.{service_id}": count,
+                "runs_this_period": count,
             }},
         )
 
@@ -202,7 +204,7 @@ def can_consume_run_and_increment(user: dict) -> bool:
     return check_and_increment_service_usage(user, "abcd_analyzer")
 
 
-def check_usage_with_org(user: dict, service_id: str) -> tuple[bool, str]:
+def check_usage_with_org(user: dict, service_id: str, count: int = 1) -> tuple[bool, str]:
     """
     Full usage check: org-level cap (outer) then user-level cap (inner).
     Admins bypass both.
@@ -210,6 +212,7 @@ def check_usage_with_org(user: dict, service_id: str) -> tuple[bool, str]:
     Returns (allowed: bool, error_message: str).
     Increments both org and user counters atomically on success.
     Rolls back org counter if user limit is hit.
+    count: number of runs to consume at once (batch submits). All-or-nothing.
     """
     roles = user.get("roles") or []
     if "admin" in roles:
@@ -224,14 +227,14 @@ def check_usage_with_org(user: dict, service_id: str) -> tuple[bool, str]:
         if org is not None:
             if org.get("status") != "active":
                 return False, "Your organization's account is suspended. Contact your admin."
-            if not check_and_increment_org_usage(org, service_id):
+            if not check_and_increment_org_usage(org, service_id, count):
                 return False, (
                     "Your organization's monthly usage limit has been reached for this service. "
                     "Contact your admin to increase the limit."
                 )
             # Org passed — now check user limit. Roll back org if user is blocked.
-            if not check_and_increment_service_usage(user, service_id):
-                decrement_org_usage(org_id, service_id)
+            if not check_and_increment_service_usage(user, service_id, count):
+                decrement_org_usage(org_id, service_id, count)
                 return False, (
                     "Your personal monthly usage limit has been reached. "
                     "Contact an admin to increase your limit."
@@ -240,7 +243,7 @@ def check_usage_with_org(user: dict, service_id: str) -> tuple[bool, str]:
         # org_id set but org not found — treat as no-org user (org may have been deleted)
 
     # No org — only user-level check
-    if not check_and_increment_service_usage(user, service_id):
+    if not check_and_increment_service_usage(user, service_id, count):
         return False, "Monthly usage limit reached. Contact an admin to increase your limit."
 
     return True, ""
