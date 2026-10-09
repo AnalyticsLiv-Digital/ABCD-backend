@@ -11,6 +11,7 @@ jobs_collection = _db[settings.MONGODB_JOBS_COLLECTION]
 users_collection = _db["users"]
 access_requests_collection = _db["access_requests"]
 image_jobs_collection = _db["image_jobs"]
+image_batches_collection = _db["image_batches"]
 resize_jobs_collection = _db["resize_jobs"]
 creatives_jobs_collection = _db["creatives_jobs"]
 prompt_creative_jobs_collection = _db["prompt_creative_jobs"]
@@ -46,6 +47,8 @@ def ensure_indexes():
     # Jobs — faster per-org/per-user list queries
     jobs_collection.create_index([("user_email", ASCENDING), ("created_at", DESCENDING)])
     image_jobs_collection.create_index([("user_email", ASCENDING), ("created_at", DESCENDING)])
+    image_jobs_collection.create_index("batch_id", sparse=True)
+    image_batches_collection.create_index([("user_email", ASCENDING), ("created_at", DESCENDING)])
     resize_jobs_collection.create_index([("user_email", ASCENDING), ("created_at", DESCENDING)])
     creatives_jobs_collection.create_index([("user_email", ASCENDING), ("created_at", DESCENDING)])
     prompt_creative_jobs_collection.create_index([("user_email", ASCENDING), ("created_at", DESCENDING)])

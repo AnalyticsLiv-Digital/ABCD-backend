@@ -7,7 +7,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
-from db import image_jobs_collection
+from db import image_batches_collection, image_jobs_collection
 
 
 class ImageJobStatus(str, Enum):
@@ -27,7 +27,7 @@ def create_image_job_record(
     original_filename: Optional[str] = None,
     original_url: Optional[str] = None,
 ) -> str:
-    """Insert a new image job document and return its job_id."""
+    """Insert a new single (non-batch) image job document and return its job_id."""
     job_id = str(uuid4())
     doc: Dict[str, Any] = {
         "_id": job_id,
@@ -88,6 +88,41 @@ def set_image_job_failed(job_id: str, error: str) -> None:
     )
 
 
+def set_image_job_failed_if_in_flight(job_id: str, error: str) -> bool:
+    """Fail a job only if it is still pending/processing (never clobbers a completed result)."""
+    result = image_jobs_collection.update_one(
+        {"_id": job_id, "status": {"$in": [ImageJobStatus.PENDING.value, ImageJobStatus.PROCESSING.value]}},
+        {"$set": {"status": ImageJobStatus.FAILED.value, "completed_at": _now_iso(), "error": error}},
+    )
+    return result.modified_count == 1
+
+
+def reset_image_job_for_retry(job_id: str, user_email: str) -> bool:
+    """
+    Atomically move a failed job (whose original is stored) back to pending for a re-run.
+    Returns False if the job is not failed / has no original (e.g. double-click on Retry).
+    """
+    result = image_jobs_collection.update_one(
+        {
+            "_id": job_id,
+            "user_email": user_email,
+            "status": ImageJobStatus.FAILED.value,
+            "original_url": {"$nin": [None, ""]},
+        },
+        {
+            "$set": {
+                "status": ImageJobStatus.PENDING.value,
+                "completed_at": None,
+                "result_urls": [],
+                "error": None,
+                "dispatched_at": _now_iso(),
+            },
+            "$inc": {"retry_count": 1},
+        },
+    )
+    return result.modified_count == 1
+
+
 def get_image_job(job_id: str, user_email: str) -> Optional[Dict[str, Any]]:
     return image_jobs_collection.find_one({"_id": job_id, "user_email": user_email})
 
@@ -98,6 +133,93 @@ def list_image_jobs(user_email: str, limit: int = 50) -> List[Dict[str, Any]]:
             {"user_email": user_email},
             sort=[("created_at", -1)],
         ).limit(limit)
+    )
+
+
+# ── Batches (multi-image submit) ─────────────────────────────────────────────
+# A batch is a thin parent record; each image is still a normal image job (same n8n
+# contract, same callback). Batch status is derived from its jobs on read.
+
+def create_image_batch(
+    user_email: str,
+    prompt: Optional[str],
+    filenames: List[str],
+) -> Dict[str, Any]:
+    """Create a batch and one pending job per file (awaiting upload). Returns the batch doc."""
+    batch_id = str(uuid4())
+    now = _now_iso()
+    job_ids = [str(uuid4()) for _ in filenames]
+    batch_doc: Dict[str, Any] = {
+        "_id": batch_id,
+        "batch_id": batch_id,
+        "user_email": user_email,
+        "created_at": now,
+        "prompt": prompt,
+        "job_ids": job_ids,
+    }
+    image_batches_collection.insert_one(batch_doc)
+    image_jobs_collection.insert_many([
+        {
+            "_id": job_id,
+            "job_id": job_id,
+            "user_email": user_email,
+            "status": ImageJobStatus.PENDING.value,
+            "created_at": now,
+            "completed_at": None,
+            "prompt": prompt,
+            "original_filename": filename,
+            "original_url": None,
+            "result_urls": [],
+            "error": None,
+            "batch_id": batch_id,
+            "batch_index": i,
+            "upload_received": False,
+        }
+        for i, (job_id, filename) in enumerate(zip(job_ids, filenames))
+    ])
+    return batch_doc
+
+
+def get_image_batch(batch_id: str, user_email: str) -> Optional[Dict[str, Any]]:
+    return image_batches_collection.find_one({"_id": batch_id, "user_email": user_email})
+
+
+def list_image_batch_jobs(batch_id: str, user_email: str) -> List[Dict[str, Any]]:
+    return list(
+        image_jobs_collection.find(
+            {"batch_id": batch_id, "user_email": user_email},
+            sort=[("batch_index", 1)],
+        )
+    )
+
+
+def claim_batch_upload(job_id: str, user_email: str) -> bool:
+    """
+    Atomically mark a batch job's file as received. Guarantees each job is dispatched
+    to n8n at most once even if the browser re-sends the upload.
+    """
+    result = image_jobs_collection.update_one(
+        {
+            "_id": job_id,
+            "user_email": user_email,
+            "status": ImageJobStatus.PENDING.value,
+            "upload_received": False,
+        },
+        {"$set": {"upload_received": True, "dispatched_at": _now_iso()}},
+    )
+    return result.modified_count == 1
+
+
+def fail_unreceived_upload(job_id: str, user_email: str, error: str) -> None:
+    """Fail a batch job whose upload was rejected (only if no file was accepted yet)."""
+    image_jobs_collection.update_one(
+        {
+            "_id": job_id,
+            "user_email": user_email,
+            "status": ImageJobStatus.PENDING.value,
+            "upload_received": False,
+        },
+        {"$set": {"status": ImageJobStatus.FAILED.value, "completed_at": _now_iso(), "error": error}},
     )
 
 

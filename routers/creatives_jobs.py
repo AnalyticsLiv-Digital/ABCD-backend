@@ -45,7 +45,7 @@ _log = logging.getLogger(__name__)
 def _check_access(user: dict) -> None:
     """
     Allow access if the user has 'creatives' in allowed_services.
-    Admin users always get access (admin-only by default for this module).
+    Admin users always get access.
     """
     roles = user.get("roles") or []
     is_admin = "admin" in roles
