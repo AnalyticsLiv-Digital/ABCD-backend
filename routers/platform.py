@@ -58,7 +58,7 @@ from db import admin_audit_collection, users_collection, organizations_collectio
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/platform", tags=["platform-admin"])
 
-VALID_SERVICES = {"abcd_analyzer", "creative_studio", "creative_resize", "creatives", "prompt_creative"}
+VALID_SERVICES = {"abcd_analyzer", "creative_studio", "creative_resize", "creatives", "prompt_creative", "creative_agent"}
 VALID_PLANS = {"starter", "pro", "enterprise"}
 
 

@@ -108,5 +108,19 @@ class Settings:
     # Max output file size hint passed to the n8n resize workflow (in KB)
     N8N_RESIZE_MAX_SIZE_KB: int = int(os.getenv("N8N_RESIZE_MAX_SIZE_KB", "999000"))
 
+    # Creative Agent – one image → up to N aspect ratios / sizes, one n8n run per output
+    # ("Adlens - Creative Agent" workflow). Use /webhook/ (production), not /webhook-test/.
+    N8N_CREATIVE_AGENT_WEBHOOK_URL: str = os.getenv(
+        "N8N_CREATIVE_AGENT_WEBHOOK_URL",
+        "https://n8n.analyticsliv.com/webhook/creative-agent",
+    )
+    # Max outputs per upload (keep in sync with MAX_TARGETS in CreativeAgentPage.jsx)
+    CREATIVE_AGENT_MAX_TARGETS: int = int(os.getenv("CREATIVE_AGENT_MAX_TARGETS", "5"))
+    # Output file-size cap passed to the workflow's compression step (KB)
+    CREATIVE_AGENT_MAX_SIZE_KB: int = int(os.getenv("CREATIVE_AGENT_MAX_SIZE_KB", "1000"))
+    # Outputs still in flight after this many minutes are marked failed
+    # (the workflow has no error callback yet, so a crash would otherwise hang forever)
+    CREATIVE_AGENT_TIMEOUT_MINUTES: int = int(os.getenv("CREATIVE_AGENT_TIMEOUT_MINUTES", "15"))
+
 
 settings = Settings()

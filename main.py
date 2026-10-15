@@ -21,6 +21,7 @@ from routers.image_batches import router as image_batches_router
 from routers.resize_jobs import router as resize_jobs_router
 from routers.creatives_jobs import router as creatives_jobs_router
 from routers.prompt_creative_jobs import router as prompt_creative_jobs_router
+from routers.creative_agent import router as creative_agent_router
 from routers.platform import router as platform_router
 
 
@@ -95,6 +96,7 @@ app.include_router(image_batches_router)
 app.include_router(resize_jobs_router)
 app.include_router(creatives_jobs_router)
 app.include_router(prompt_creative_jobs_router)
+app.include_router(creative_agent_router)
 app.include_router(platform_router)
 
 
