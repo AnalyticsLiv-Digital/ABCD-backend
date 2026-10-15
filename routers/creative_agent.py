@@ -17,7 +17,7 @@ Flow:
 
 Payload sent TO n8n (multipart/form-data, one call per job):
   image, prompt ("I want to change this image to <ratio> aspect ratio (<name>)[. <instructions>]"
-  — same format as Creative Studio), sizes (JSON, exactly one entry), max_size_kb,
+  — same format as Creative Studio), sizes (JSON, exactly one entry), max_size_kb (user-chosen, KB),
   job_id, batch_id, callback_url, callback_secret (per-job token)
 
 Callback FROM n8n (JSON):
@@ -69,6 +69,7 @@ _log = logging.getLogger(__name__)
 SERVICE_ID = "creative_agent"
 MAX_IMAGE_BYTES = 20 * 1024 * 1024
 MIN_DIM, MAX_DIM = 50, 8000
+MIN_MAX_SIZE_KB, MAX_MAX_SIZE_KB = 10, 999000   # bounds for the user-chosen max output size
 N8N_ACK_TIMEOUT_SECONDS = 60   # the workflow responds right after its image check
 
 
@@ -80,7 +81,7 @@ def _check_access(user: dict) -> None:
     if SERVICE_ID not in (user.get("allowed_services") or []):
         raise HTTPException(
             status_code=403,
-            detail="Your account does not have access to Creative Agent. Contact an admin.",
+            detail="Your account does not have access to Creative Resize Agent. Contact an admin.",
         )
 
 
@@ -220,6 +221,7 @@ def _batch_response(batch: dict, jobs: List[dict]) -> dict:
         "source_width":      batch.get("source_width"),
         "source_height":     batch.get("source_height"),
         "instructions":      batch.get("instructions"),
+        "max_size_kb":       batch.get("max_size_kb"),
         "total":             len(jobs),
         "completed":         completed,
         "failed":            failed,
@@ -254,6 +256,7 @@ def _dispatch(
     target: Dict[str, Any],
     callback_url: str,
     token: str,
+    max_size_kb: int,
 ) -> None:
     """POST one output to n8n. n8n acks immediately and calls back with the result."""
     import requests as _req
@@ -267,7 +270,7 @@ def _dispatch(
                 "prompt":          prompt,
                 "sizes":           json.dumps([{"name": f"{target['width']}x{target['height']}",
                                                 "width": target["width"], "height": target["height"]}]),
-                "max_size_kb":     str(settings.CREATIVE_AGENT_MAX_SIZE_KB),
+                "max_size_kb":     str(max_size_kb),
                 "job_id":          job_id,
                 "batch_id":        batch_id,
                 "callback_url":    callback_url,
@@ -312,6 +315,7 @@ def _process_batch(
     content_type: str,
     filename: str,
     dispatches: List[Dict[str, Any]],
+    max_size_kb: int,
 ) -> None:
     """Store the original once (needed for retries), then fan out every output in parallel."""
     ext = (content_type.split("/")[-1] or "jpg")[:10]
@@ -330,7 +334,7 @@ def _process_batch(
         for d in dispatches:
             pool.submit(
                 _dispatch, d["job_id"], batch_id, image_data, content_type, filename,
-                d["prompt"], d["target"], d["callback_url"], d["token"],
+                d["prompt"], d["target"], d["callback_url"], d["token"], max_size_kb,
             )
 
 
@@ -345,12 +349,17 @@ async def create_agent_batch(
     instructions: Optional[str] = Form(None),
     source_width: Optional[int] = Form(None),
     source_height: Optional[int] = Form(None),
+    max_size_kb: Optional[int] = Form(None),   # max output file size in KB; omitted → server default
     current_user: dict = Depends(get_current_user),
 ):
     """Upload one image and request up to N outputs. Each output costs one run."""
     _check_access(current_user)
     target_list = _parse_targets(targets)
     instructions = (instructions or "").strip()[:1000] or None
+    if max_size_kb is None:
+        max_size_kb = settings.CREATIVE_AGENT_MAX_SIZE_KB
+    elif not MIN_MAX_SIZE_KB <= max_size_kb <= MAX_MAX_SIZE_KB:
+        raise HTTPException(400, f"Max output size must be between {MIN_MAX_SIZE_KB} KB and {MAX_MAX_SIZE_KB} KB.")
 
     image_data = await image.read()
     content_type = (image.content_type or "image/jpeg").split(";")[0].strip()
@@ -367,7 +376,7 @@ async def create_agent_batch(
     filename = image.filename or "image.jpg"
     tokens = [secrets.token_urlsafe(32) for _ in target_list]
     batch = create_batch(
-        current_user["email"], filename, source_width, source_height, instructions,
+        current_user["email"], filename, source_width, source_height, instructions, max_size_kb,
         [
             {"target": t, "prompt": _build_prompt(t, instructions),
              "token_hash": hash_token(tok)}
@@ -381,7 +390,7 @@ async def create_agent_batch(
          "callback_url": _callback_url(request, j["job_id"]), "token": token_by_index[j["index"]]}
         for j in jobs
     ]
-    background_tasks.add_task(_process_batch, batch["batch_id"], image_data, content_type, filename, dispatches)
+    background_tasks.add_task(_process_batch, batch["batch_id"], image_data, content_type, filename, dispatches, max_size_kb)
     return _batch_response(batch, jobs)
 
 
@@ -517,6 +526,7 @@ def retry_agent_job(
         _dispatch, job_id, batch["batch_id"], r.content, content_type,
         batch.get("original_filename") or "image.jpg", job["prompt"], job["target"],
         _callback_url(request, job_id), token,
+        batch.get("max_size_kb") or settings.CREATIVE_AGENT_MAX_SIZE_KB,
     )
     return _job_response(get_job(job_id, email))
 
