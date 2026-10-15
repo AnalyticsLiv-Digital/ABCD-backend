@@ -16,7 +16,8 @@ Flow:
   7. GET  /creative-agent/batches/{id}/download, /jobs/{id}/download → ZIP / single file
 
 Payload sent TO n8n (multipart/form-data, one call per job):
-  image, prompt, sizes (JSON, exactly one entry), max_size_kb,
+  image, prompt ("I want to change this image to <ratio> aspect ratio (<name>)[. <instructions>]"
+  — same format as Creative Studio), sizes (JSON, exactly one entry), max_size_kb,
   job_id, batch_id, callback_url, callback_secret (per-job token)
 
 Callback FROM n8n (JSON):
@@ -94,11 +95,23 @@ def _ratio_label(w: int, h: int) -> str:
     return "1:" + f"{h / w:.2f}".rstrip("0").rstrip(".")
 
 
-def _build_prompt(w: int, h: int, instructions: Optional[str]) -> str:
-    prompt = f"I want to change this image to {_ratio_label(w, h)} aspect ratio ({w}x{h} px)"
-    if instructions:
-        prompt += f". Additional instructions: {instructions}"
-    return prompt
+def _build_prompt(target: Dict[str, Any], instructions: Optional[str]) -> str:
+    """Same format as Creative Studio: '<ratio sentence>. <user prompt>'. Pixel size travels in `sizes`."""
+    prompt = f"I want to change this image to {target['ratio']} aspect ratio ({target['label']})"
+    return f"{prompt}. {instructions}" if instructions else prompt
+
+
+_RATIO_RE = re.compile(r"^\d{1,3}(\.\d{1,2})?:\d{1,3}(\.\d{1,2})?$")
+
+
+def _client_ratio(raw: Any, w: int, h: int) -> Optional[str]:
+    """Accept the picker's canonical ratio (e.g. '8:1' for 728x90) when it matches the size within 3%."""
+    if not isinstance(raw, str) or not _RATIO_RE.match(raw.strip()):
+        return None
+    a, b = (float(x) for x in raw.strip().split(":"))
+    if a <= 0 or b <= 0 or abs((a / b) / (w / h) - 1) > 0.03:
+        return None
+    return raw.strip()
 
 
 def _parse_targets(raw: str) -> List[Dict[str, Any]]:
@@ -126,8 +139,8 @@ def _parse_targets(raw: str) -> List[Dict[str, Any]]:
             raise HTTPException(400, f"{w}×{h} was selected twice.")
         seen.add((w, h))
         kind = "ratio" if item.get("kind") == "ratio" else "size"
-        ratio = _ratio_label(w, h)
-        label = str(item.get("label") or (ratio if kind == "ratio" else f"{w}x{h}"))[:60]
+        ratio = _client_ratio(item.get("ratio"), w, h) or _ratio_label(w, h)
+        label = str(item.get("label") or "").strip()[:60] or "Custom"
         targets.append({"kind": kind, "label": label, "width": w, "height": h, "ratio": ratio})
     return targets
 
@@ -328,7 +341,7 @@ async def create_agent_batch(
     request: Request,
     background_tasks: BackgroundTasks,
     image: UploadFile = File(...),
-    targets: str = Form(...),          # JSON: [{"kind":"ratio"|"size","width":W,"height":H,"label"?}, …]
+    targets: str = Form(...),          # JSON: [{"kind","width","height","ratio"?: "8:1","label"?: "Leaderboard"}, …]
     instructions: Optional[str] = Form(None),
     source_width: Optional[int] = Form(None),
     source_height: Optional[int] = Form(None),
@@ -356,7 +369,7 @@ async def create_agent_batch(
     batch = create_batch(
         current_user["email"], filename, source_width, source_height, instructions,
         [
-            {"target": t, "prompt": _build_prompt(t["width"], t["height"], instructions),
+            {"target": t, "prompt": _build_prompt(t, instructions),
              "token_hash": hash_token(tok)}
             for t, tok in zip(target_list, tokens)
         ],
