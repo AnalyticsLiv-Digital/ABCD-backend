@@ -54,10 +54,12 @@ def ensure_indexes():
     resize_jobs_collection.create_index([("user_email", ASCENDING), ("created_at", DESCENDING)])
     creatives_jobs_collection.create_index([("user_email", ASCENDING), ("created_at", DESCENDING)])
     prompt_creative_jobs_collection.create_index([("user_email", ASCENDING), ("created_at", DESCENDING)])
-    creative_agent_batches_collection.create_index([("user_email", ASCENDING), ("created_at", DESCENDING)])
-    creative_agent_jobs_collection.create_index([("batch_id", ASCENDING), ("index", ASCENDING)])
 
     # Audit log — query by admin and by target user
     admin_audit_collection.create_index([("admin_email", ASCENDING), ("at", DESCENDING)])
     admin_audit_collection.create_index([("target_user_email", ASCENDING), ("at", DESCENDING)])
+
+    # Creative Agent — last, so it can never block the indexes above
+    creative_agent_batches_collection.create_index([("user_email", ASCENDING), ("created_at", DESCENDING)])
+    creative_agent_jobs_collection.create_index([("batch_id", ASCENDING), ("index", ASCENDING)])
 
