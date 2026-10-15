@@ -247,6 +247,7 @@ def _welcome_body(display_name: str, org_name: str, app_url: str, allowed_servic
         "creative_resize":  ("↔", C["honey"],   "Creative Resize",  "Resize creatives to any platform format instantly"),
         "creatives":        ("◈", C["accent"],  "Creatives",        "Aspect-ratio agent for reformatting creatives"),
         "prompt_creative":  ("✎", C["teal"],    "Prompt Creative",  "Generate on-brand ad creatives from a text prompt"),
+        "creative_agent":   ("⧉", C["accent"],  "Creative Agent",   "Adapt one creative to multiple aspect ratios and sizes"),
     }
 
     modules_html = ""

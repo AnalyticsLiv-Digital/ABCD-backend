@@ -15,6 +15,8 @@ image_batches_collection = _db["image_batches"]
 resize_jobs_collection = _db["resize_jobs"]
 creatives_jobs_collection = _db["creatives_jobs"]
 prompt_creative_jobs_collection = _db["prompt_creative_jobs"]
+creative_agent_batches_collection = _db["creative_agent_batches"]
+creative_agent_jobs_collection = _db["creative_agent_jobs"]
 
 # Multi-tenancy collections
 organizations_collection = _db["organizations"]
@@ -56,4 +58,8 @@ def ensure_indexes():
     # Audit log — query by admin and by target user
     admin_audit_collection.create_index([("admin_email", ASCENDING), ("at", DESCENDING)])
     admin_audit_collection.create_index([("target_user_email", ASCENDING), ("at", DESCENDING)])
+
+    # Creative Agent — last, so it can never block the indexes above
+    creative_agent_batches_collection.create_index([("user_email", ASCENDING), ("created_at", DESCENDING)])
+    creative_agent_jobs_collection.create_index([("batch_id", ASCENDING), ("index", ASCENDING)])
 
