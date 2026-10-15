@@ -38,6 +38,7 @@ def create_batch(
     source_width: Optional[int],
     source_height: Optional[int],
     instructions: Optional[str],
+    max_size_kb: int,
     jobs: List[Dict[str, Any]],
 ) -> Dict[str, Any]:
     """
@@ -58,6 +59,7 @@ def create_batch(
         "source_width": source_width,
         "source_height": source_height,
         "instructions": instructions,
+        "max_size_kb": max_size_kb,
         "job_ids": job_ids,
     }
     creative_agent_batches_collection.insert_one(batch_doc)
