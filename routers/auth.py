@@ -263,7 +263,8 @@ async def google_login(body: GoogleLoginBody):
             "plan": org.get("plan", "starter"),
             # Keep legacy fields so existing _user_public() still works
             "allowed_services": org.get("allowed_services", ["abcd_analyzer"]),
-            "service_limits": org.get("service_limits", {}),
+            # Per-member cap; orgs without default_member_limits keep the old copy-org-limits behaviour
+            "service_limits": org.get("default_member_limits") or org.get("service_limits", {}),
             "service_usage": {s: 0 for s in ALL_SERVICES},
             "max_runs_per_month": 0,
             "runs_this_period": 0,
