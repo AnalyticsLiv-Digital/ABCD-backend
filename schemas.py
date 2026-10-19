@@ -166,6 +166,8 @@ class JobResponse(BaseModel):
     creative_format: Optional[str] = None
     objective: Optional[str] = None
     advanced: Optional[AdvancedOptions] = None
+    # Set when this analysis scores a Video Variants output: {video_variant_job_id, render_id, format, title}
+    source: Optional[Dict[str, Any]] = None
 
 
 class CreateJobResponse(BaseModel):

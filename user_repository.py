@@ -12,8 +12,16 @@ from db import users_collection
 pwd_context = CryptContext(schemes=["pbkdf2_sha256"], deprecated="auto")
 
 # Services tracked for per-module usage
-ALL_SERVICES = ["abcd_analyzer", "creative_studio", "creative_resize", "creatives", "prompt_creative", "creative_agent"]
+ALL_SERVICES = ["abcd_analyzer", "creative_studio", "creative_resize", "creatives", "prompt_creative", "creative_agent", "video_variants"]
 DEFAULT_SERVICE_LIMIT = 20
+
+# Services whose usage is counted in credits rather than runs, with their own default limit.
+# video_variants: 1 credit = up to 30 s of video (see routers/video_variant_jobs.py).
+SERVICE_DEFAULT_LIMITS = {"video_variants": 60}
+
+
+def default_service_limit(service_id: str) -> int:
+    return SERVICE_DEFAULT_LIMITS.get(service_id, DEFAULT_SERVICE_LIMIT)
 
 
 def hash_password(password: str) -> str:
@@ -69,7 +77,7 @@ def create_user(email: str, password: str, max_runs_per_month: int = 20) -> dict
         "usage_period_start": now,
         "allowed_services": default_services,
         # Per-module usage limits (admin-configurable, default 20 each)
-        "service_limits": {s: DEFAULT_SERVICE_LIMIT for s in ALL_SERVICES},
+        "service_limits": {s: default_service_limit(s) for s in ALL_SERVICES},
         # Per-module usage counters (reset each calendar month)
         "service_usage": {s: 0 for s in ALL_SERVICES},
     }
@@ -113,7 +121,7 @@ def check_and_increment_service_usage(user: dict, service_id: str, count: int = 
     - Admin users: always allowed (infinite usage, no increment stored).
     - Monthly reset: if the current calendar month differs from usage_period_start,
       all service_usage counters reset to 0 before checking.
-    - Limit source: user.service_limits[service_id], defaults to DEFAULT_SERVICE_LIMIT (20).
+    - Limit source: user.service_limits[service_id], defaults to default_service_limit().
 
     count: number of runs to consume at once (batch submits). All-or-nothing.
 
@@ -141,7 +149,7 @@ def check_and_increment_service_usage(user: dict, service_id: str, count: int = 
 
     # Limit for this service
     service_limits = user.get("service_limits") or {}
-    limit = int(service_limits.get(service_id, DEFAULT_SERVICE_LIMIT))
+    limit = int(service_limits.get(service_id, default_service_limit(service_id)))
 
     if current_usage + count > limit:
         return False
@@ -247,3 +255,20 @@ def check_usage_with_org(user: dict, service_id: str, count: int = 1) -> tuple[b
         return False, "Monthly usage limit reached. Contact an admin to increase your limit."
 
     return True, ""
+
+
+def refund_usage_with_org(user: dict, service_id: str, count: int = 1) -> None:
+    """
+    Give back usage previously taken by check_usage_with_org (e.g. a failed render).
+    Admins are never charged, so there is nothing to refund. Counters never go below 0.
+    """
+    if count <= 0 or "admin" in (user.get("roles") or []):
+        return
+    users_collection.update_one(
+        {"_id": user["_id"], f"service_usage.{service_id}": {"$gte": count}},
+        {"$inc": {f"service_usage.{service_id}": -count, "runs_this_period": -count}},
+    )
+    org_id = user.get("org_id")
+    if org_id:
+        from org_repository import decrement_org_usage
+        decrement_org_usage(org_id, service_id, count)

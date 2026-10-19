@@ -22,7 +22,7 @@ from routers.auth import get_current_user
 from email_service import send_invitation_email
 from org_repository import (
     ALL_SERVICES,
-    DEFAULT_ORG_SERVICE_LIMIT,
+    default_org_service_limit,
     create_org,
     create_invitation,
     get_org_by_id,
@@ -53,12 +53,16 @@ from prompt_creative_job_repository import (
     get_prompt_creative_job_admin,
     list_prompt_creative_jobs_admin,
 )
+from video_variant_job_repository import (
+    get_video_variant_job_admin,
+    list_video_variant_jobs_admin,
+)
 from db import admin_audit_collection, users_collection, organizations_collection
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/platform", tags=["platform-admin"])
 
-VALID_SERVICES = {"abcd_analyzer", "creative_studio", "creative_resize", "creatives", "prompt_creative", "creative_agent"}
+VALID_SERVICES = {"abcd_analyzer", "creative_studio", "creative_resize", "creatives", "prompt_creative", "creative_agent", "video_variants"}
 VALID_PLANS = {"starter", "pro", "enterprise"}
 
 
@@ -182,7 +186,7 @@ async def create_organization(
             raise HTTPException(400, f"Limit for {svc} must be a non-negative integer")
 
     # Fill any missing service limits with defaults
-    limits = {s: DEFAULT_ORG_SERVICE_LIMIT for s in ALL_SERVICES}
+    limits = {s: default_org_service_limit(s) for s in ALL_SERVICES}
     limits.update(body.service_limits)
 
     org = create_org(
@@ -414,7 +418,7 @@ async def update_org_user_status(
 
 # ── Cross-org job viewer (platform-admin only) ────────────────────────────────
 
-JOB_SERVICES = {"abcd", "studio", "resize", "creatives", "prompt"}
+JOB_SERVICES = {"abcd", "studio", "resize", "creatives", "prompt", "video"}
 
 
 def _audit(
@@ -516,6 +520,9 @@ async def list_org_jobs(
     if "prompt" in services_to_query:
         for j in list_prompt_creative_jobs_admin(emails, status=status_filter, limit=limit, skip=skip):
             combined.append({**j, "service": "prompt"})
+    if "video" in services_to_query:
+        for j in list_video_variant_jobs_admin(emails, status=status_filter, limit=limit, skip=skip):
+            combined.append({**j, "service": "video"})
 
     # Stable ordering across services
     combined.sort(key=lambda x: x.get("created_at") or "", reverse=True)
@@ -603,6 +610,27 @@ async def get_job_admin_detail(
             "prompt": doc.get("prompt"),
             "aspect_ratio": doc.get("aspect_ratio"),
             "result_urls": doc.get("result_urls") or [],
+            "error": doc.get("error"),
+        }
+    elif service == "video":
+        doc = get_video_variant_job_admin(job_id)
+        if not doc:
+            raise HTTPException(404, "Job not found")
+        owner_email = doc.get("user_email")
+        payload = {
+            "job_id": doc["job_id"],
+            "status": doc["status"],
+            "created_at": doc["created_at"],
+            "original_filename": doc.get("original_filename"),
+            "duration_s": doc.get("duration_s"),
+            "brief": doc.get("brief"),
+            "objective": doc.get("objective"),
+            "renders": [
+                {k: r.get(k) for k in ("render_id", "status", "created_at", "formats", "variants", "credits", "error")}
+                | {"file_count": len(r.get("files") or [])}
+                for r in doc.get("renders") or []
+            ],
+            "charges": doc.get("charges") or [],
             "error": doc.get("error"),
         }
     else:  # creatives

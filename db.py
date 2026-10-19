@@ -17,6 +17,7 @@ creatives_jobs_collection = _db["creatives_jobs"]
 prompt_creative_jobs_collection = _db["prompt_creative_jobs"]
 creative_agent_batches_collection = _db["creative_agent_batches"]
 creative_agent_jobs_collection = _db["creative_agent_jobs"]
+video_variant_jobs_collection = _db["video_variant_jobs"]
 
 # Multi-tenancy collections
 organizations_collection = _db["organizations"]
@@ -62,4 +63,7 @@ def ensure_indexes():
     # Creative Agent — last, so it can never block the indexes above
     creative_agent_batches_collection.create_index([("user_email", ASCENDING), ("created_at", DESCENDING)])
     creative_agent_jobs_collection.create_index([("batch_id", ASCENDING), ("index", ASCENDING)])
+
+    # Video Variants
+    video_variant_jobs_collection.create_index([("user_email", ASCENDING), ("created_at", DESCENDING)])
 

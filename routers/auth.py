@@ -11,7 +11,7 @@ from auth_utils import create_access_token, decode_access_token, verify_google_t
 from email_service import send_welcome_email
 from user_repository import (
     ALL_SERVICES,
-    DEFAULT_SERVICE_LIMIT,
+    default_service_limit,
     create_user,
     get_user_by_email,
     is_usage_period_stale,
@@ -53,7 +53,7 @@ class UserCreate(UserBase):
     max_runs_per_month: int = 20
 
 
-VALID_SERVICES = {"abcd_analyzer", "creative_studio", "creative_resize", "creatives", "prompt_creative", "creative_agent"}
+VALID_SERVICES = {"abcd_analyzer", "creative_studio", "creative_resize", "creatives", "prompt_creative", "creative_agent", "video_variants"}
 
 
 class UserPublic(UserBase):
@@ -117,7 +117,7 @@ def _user_public(user: dict) -> UserPublic:
 
     # Back-fill service_limits for users created before this feature
     raw_limits = user.get("service_limits") or {}
-    service_limits = {s: int(raw_limits.get(s, DEFAULT_SERVICE_LIMIT)) for s in ALL_SERVICES}
+    service_limits = {s: int(raw_limits.get(s, default_service_limit(s))) for s in ALL_SERVICES}
 
     raw_usage = user.get("service_usage") or {}
     service_usage = {s: int(raw_usage.get(s, 0)) for s in ALL_SERVICES}

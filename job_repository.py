@@ -113,6 +113,7 @@ def _build_job_response(doc: Dict[str, Any]) -> JobResponse:
         creative_format=doc.get("creative_format"),
         objective=doc.get("objective"),
         advanced=doc.get("advanced"),
+        source=doc.get("source"),
     )
 
 
