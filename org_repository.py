@@ -23,8 +23,14 @@ from bson import ObjectId
 
 from db import invitations_collection, organizations_collection, users_collection
 
-ALL_SERVICES = ["abcd_analyzer", "creative_studio", "creative_resize", "creatives", "prompt_creative", "creative_agent"]
+ALL_SERVICES = ["abcd_analyzer", "creative_studio", "creative_resize", "creatives", "prompt_creative", "creative_agent", "video_variants"]
 DEFAULT_ORG_SERVICE_LIMIT = 50  # runs/month per service for a new org
+# Credit-based services get their own org default (video_variants: 1 credit = up to 30 s of video)
+ORG_SERVICE_DEFAULT_LIMITS = {"video_variants": 50}
+
+
+def default_org_service_limit(service_id: str) -> int:
+    return ORG_SERVICE_DEFAULT_LIMITS.get(service_id, DEFAULT_ORG_SERVICE_LIMIT)
 
 
 # ── Organizations ─────────────────────────────────────────────────────────────
@@ -51,7 +57,7 @@ def create_org(
         "plan": plan,
         "status": "active",
         "allowed_services": allowed_services or ["abcd_analyzer"],
-        "service_limits": service_limits or {s: DEFAULT_ORG_SERVICE_LIMIT for s in ALL_SERVICES},
+        "service_limits": service_limits or {s: default_org_service_limit(s) for s in ALL_SERVICES},
         "service_usage": {s: 0 for s in ALL_SERVICES},
         "usage_period_start": now,
         # Domain whitelist: anyone whose Google email domain matches auto-joins this org
@@ -108,7 +114,7 @@ def check_and_increment_org_usage(org: dict, service_id: str, count: int = 1) ->
         period_start = datetime.fromisoformat(period_start)
 
     new_month = period_start.year != now.year or period_start.month != now.month
-    limit = int((org.get("service_limits") or {}).get(service_id, DEFAULT_ORG_SERVICE_LIMIT))
+    limit = int((org.get("service_limits") or {}).get(service_id, default_org_service_limit(service_id)))
 
     if new_month:
         # Save the previous month's snapshot before resetting
@@ -116,7 +122,7 @@ def check_and_increment_org_usage(org: dict, service_id: str, count: int = 1) ->
         history_entry = {
             "period": period_start.strftime("%Y-%m"),
             "usage": {s: int(old_usage.get(s, 0)) for s in ALL_SERVICES},
-            "limits": {s: int((org.get("service_limits") or {}).get(s, DEFAULT_ORG_SERVICE_LIMIT)) for s in ALL_SERVICES},
+            "limits": {s: int((org.get("service_limits") or {}).get(s, default_org_service_limit(s))) for s in ALL_SERVICES},
         }
         organizations_collection.update_one(
             {"_id": org["_id"]},
@@ -171,7 +177,7 @@ def reset_org_period_if_stale(org: dict) -> None:
     history_entry = {
         "period": period_start.strftime("%Y-%m"),
         "usage": {s: int(old_usage.get(s, 0)) for s in ALL_SERVICES},
-        "limits": {s: int((org.get("service_limits") or {}).get(s, DEFAULT_ORG_SERVICE_LIMIT)) for s in ALL_SERVICES},
+        "limits": {s: int((org.get("service_limits") or {}).get(s, default_org_service_limit(s))) for s in ALL_SERVICES},
     }
     organizations_collection.update_one(
         {"_id": org["_id"]},

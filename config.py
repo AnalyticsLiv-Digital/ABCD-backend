@@ -49,7 +49,7 @@ class Settings:
     # Auth / JWT
     JWT_SECRET_KEY: str = os.getenv("JWT_SECRET_KEY", "change-me-in-production")
     JWT_ALGORITHM: str = os.getenv("JWT_ALGORITHM", "HS256")
-    ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "60"))
+    ACCESS_TOKEN_EXPIRE_MINUTES: int = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", "1440"))
 
     # Google OAuth — get from GCP Console → APIs & Services → Credentials
     # Set GOOGLE_CLIENT_ID to enable "Sign in with Google" for external users.
@@ -121,6 +121,26 @@ class Settings:
     # Outputs still in flight after this many minutes are marked failed
     # (the workflow has no error callback yet, so a crash would otherwise hang forever)
     CREATIVE_AGENT_TIMEOUT_MINUTES: int = int(os.getenv("CREATIVE_AGENT_TIMEOUT_MINUTES", "15"))
+
+    # Video Variants – ViGenAiR engine (separate Cloud Function in its own project, see
+    # docs/05-vigenair-backend-guide.md). The backend copies videos into VIGENAIR_BUCKET,
+    # which starts the analysis; services/vigenair/ holds everything ViGenAiR-specific.
+    VIGENAIR_PROJECT_ID: str = os.getenv("VIGENAIR_PROJECT_ID", "adlens-vigenair")
+    VIGENAIR_LOCATION: str = os.getenv("VIGENAIR_LOCATION", "europe-west1")
+    VIGENAIR_BUCKET: str = os.getenv("VIGENAIR_BUCKET", "")
+    VIGENAIR_GEMINI_MODEL: str = os.getenv("VIGENAIR_GEMINI_MODEL", "gemini-2.5-flash")
+    # Service account used to sign V4 URLs when credentials have no private key
+    # (Cloud Run, impersonated ADC). Empty = the credentials' own service account.
+    VIGENAIR_SIGNER_SA: str = os.getenv("VIGENAIR_SIGNER_SA", "")
+    # Longest video accepted, checked before anything is charged
+    MAX_VIDEO_SECONDS: float = float(os.getenv("MAX_VIDEO_SECONDS", "120"))
+    MAX_VIDEO_UPLOAD_MB: int = int(os.getenv("MAX_VIDEO_UPLOAD_MB", "500"))
+    # 1 credit = up to this many seconds of video (analysis per video, render per output file)
+    VIDEO_CREDIT_SECONDS: int = int(os.getenv("VIDEO_CREDIT_SECONDS", "30"))
+    # Analysis / render still unfinished after this many minutes → failed and refunded.
+    # Video Intelligence latency varies a lot (1.5 min to 10.5 min seen for the same 21 s ad).
+    VIDEO_ANALYSIS_TIMEOUT_MINUTES: int = int(os.getenv("VIDEO_ANALYSIS_TIMEOUT_MINUTES", "30"))
+    VIDEO_RENDER_TIMEOUT_MINUTES: int = int(os.getenv("VIDEO_RENDER_TIMEOUT_MINUTES", "30"))
 
 
 settings = Settings()
