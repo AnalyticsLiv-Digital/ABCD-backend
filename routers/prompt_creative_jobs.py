@@ -13,10 +13,19 @@ Async callback pattern (no 504):
   4. POST /prompt-creative-jobs/{id}/complete → receives results, uploads to GCS, marks completed
   5. GET  /prompt-creative-jobs/{id}         → poll until status = completed | failed
   6. GET  /prompt-creative-jobs              → list user's history
+
+SVG exports (download as PNG or SVG):
+  The workflow builds editable / outlined / overlay SVGs per variant ("Build Editable SVG") and
+  sends them in the SAME payload as the PNGs: {images: [...], svgs: [...], photos: [...]}.
+  To keep that payload small the photo-backed SVGs carry SVG_PHOTO_TOKEN instead of the photo,
+  which is sent once per version in `photos` and put back here before storing.
+  Older workflow versions POST the SVGs separately as {status: "svg_generated", svgs: [...]};
+  that is still accepted. svg_status: pending → ready (or unavailable if none arrive).
 """
 import base64
 import hmac
 import logging
+import re
 from datetime import datetime, timedelta
 from typing import Any, List, Optional
 
@@ -34,6 +43,9 @@ from prompt_creative_job_repository import (
     set_prompt_creative_job_completed,
     set_prompt_creative_job_failed,
     set_prompt_creative_job_processing,
+    set_prompt_creative_job_svg_unavailable,
+    set_prompt_creative_job_svgs,
+    PromptCreativeSvgStatus,
 )
 from routers.auth import get_current_user
 
@@ -44,6 +56,11 @@ MAX_PROMPT_CHARS = 2000  # mirrors the workflow's "Prompt Provided?" check
 # Aspect ratios accepted by Gemini image generation
 ASPECT_RATIOS = {"1:1", "4:5", "3:4", "2:3", "3:2", "4:3", "9:16", "16:9", "21:9"}
 DEFAULT_ASPECT_RATIO = "16:9"  # the workflow's original hard-coded value
+# SVG variants written by the workflow's "Build Editable SVG" node (labels from "Package SVG Callback")
+SVG_VARIANTS = ("editable", "outlined", "overlay")
+DOWNLOAD_FORMATS = ("png",) + SVG_VARIANTS
+# Placeholder written by "Package Webhook Response" where the photo data URI was stripped out
+SVG_PHOTO_TOKEN = b"__ADLENS_PHOTO__"
 
 
 class PromptCreativeCreate(BaseModel):
@@ -76,7 +93,33 @@ def _to_response(doc: dict) -> dict:
         "aspect_ratio": doc.get("aspect_ratio"),
         "result_urls":  doc.get("result_urls") or [],
         "error":        doc.get("error"),
+        # Only meaningful once the PNGs are in; jobs from before SVG support have none → unavailable
+        "svg_status":   (
+            doc.get("svg_status") or PromptCreativeSvgStatus.UNAVAILABLE.value
+        ) if doc.get("status") == "completed" else None,
+        "svg_files":    [
+            {k: f.get(k) for k in ("version", "variant", "file_name")}
+            for f in (doc.get("svg_files") or [])
+        ],
     }
+
+
+def _expire_svg_if_stale(doc: dict) -> dict:
+    """
+    The SVG callback comes a minute or so after the PNGs. If it never arrives (SVG branch errored,
+    "Send SVG to AdLens" disabled) stop showing "preparing" once PROMPT_CREATIVE_SVG_TIMEOUT_MINUTES pass.
+    """
+    if doc.get("status") != "completed" or doc.get("svg_status") != PromptCreativeSvgStatus.PENDING.value:
+        return doc
+    try:
+        completed = datetime.strptime(doc["completed_at"], "%Y-%m-%dT%H:%M:%SZ")
+    except (KeyError, TypeError, ValueError):
+        return doc
+    if datetime.utcnow() - completed > timedelta(minutes=settings.PROMPT_CREATIVE_SVG_TIMEOUT_MINUTES):
+        error = "SVG files were not received from the creative service."
+        set_prompt_creative_job_svg_unavailable(doc["job_id"], error)
+        doc = {**doc, "svg_status": PromptCreativeSvgStatus.UNAVAILABLE.value, "svg_error": error}
+    return doc
 
 
 def _expire_if_stale(doc: dict) -> dict:
@@ -85,7 +128,7 @@ def _expire_if_stale(doc: dict) -> dict:
     Fail jobs that have been in flight longer than PROMPT_CREATIVE_TIMEOUT_MINUTES.
     """
     if doc.get("status") not in ("pending", "processing"):
-        return doc
+        return _expire_svg_if_stale(doc)
     try:
         created = datetime.strptime(doc["created_at"], "%Y-%m-%dT%H:%M:%SZ")
     except (KeyError, ValueError):
@@ -103,7 +146,7 @@ def _decode_images(images: Any) -> List[tuple]:
     """
     Normalise n8n image entries to (bytes, content_type) pairs. Accepts:
       {"data": "<base64>", "content_type": "image/png"}   (callback shape)
-      {"dataUrl": "data:image/png;base64,...", "mimeType": "image/png"}  (Package Webhook Response shape)
+      {"dataUrl": "data:image/png;base64,...", "mimeType": "image/png"}  (webhook response shape)
     """
     pairs: List[tuple] = []
     if not isinstance(images, list):
@@ -125,14 +168,20 @@ def _decode_images(images: Any) -> List[tuple]:
     return pairs
 
 
-def _store_results(job_id: str, images: Any) -> bool:
-    """Upload decoded images to GCS and mark the job completed. Returns True on success."""
+def _store_results(job_id: str, images: Any, svgs: Any = None, photos: Any = None) -> bool:
+    """
+    Upload decoded images (and any SVGs sent alongside them) to GCS and mark the job completed.
+    Returns True on success.
+    """
     doc = get_prompt_creative_job_any(job_id)
     if not doc:
         _log.warning("Results received for unknown prompt creative job %s", job_id)
         return False
     if doc.get("status") == "completed":
-        return True  # already stored (sync response and callback can both arrive)
+        # already stored (sync response and callback can both arrive) — only fill in missing SVGs
+        if svgs and doc.get("svg_status") != PromptCreativeSvgStatus.READY.value:
+            _store_svgs(job_id, svgs, photos)
+        return True
 
     pairs = _decode_images(images)
     if not pairs:
@@ -153,8 +202,73 @@ def _store_results(job_id: str, images: Any) -> bool:
         set_prompt_creative_job_failed(job_id, "Failed to store result images to cloud storage")
         return False
 
+    # Store SVGs before flipping to completed so the UI never sees a completed job without them
+    svgs_ok = bool(svgs) and _store_svgs(job_id, svgs, photos)
     set_prompt_creative_job_completed(job_id, result_urls)
+    # svgs present but empty = the workflow's SVG step failed; don't leave the UI waiting for them
+    if svgs is not None and not svgs_ok:
+        set_prompt_creative_job_svg_unavailable(job_id, "SVG files could not be stored.")
     _log.info("Prompt creative job %s completed — %d result(s)", job_id, len(result_urls))
+    return True
+
+
+# ── SVG exports ───────────────────────────────────────────────────────────────
+
+def _photo_data_uris(photos: Any) -> dict:
+    """{"v1": b"data:image/png;base64,..."} from [{"version", "content_type", "data"}] — used to restore SVG_PHOTO_TOKEN."""
+    uris = {}
+    for item in photos if isinstance(photos, list) else []:
+        if isinstance(item, dict) and item.get("version") and isinstance(item.get("data"), str):
+            ct = str(item.get("content_type") or "image/png")
+            uris[str(item["version"])] = f"data:{ct};base64,{item['data']}".encode("ascii")
+    return uris
+
+
+def _store_svgs(job_id: str, svgs: Any, photos: Any = None) -> bool:
+    """
+    Upload the workflow's SVG files to GCS and attach them to the job. Accepts
+    [{"version": "v1", "variant": "editable", "file_name", "data": "<base64>"}]; SVGs that carry
+    SVG_PHOTO_TOKEN get the matching version's photo from `photos` put back in.
+    """
+    doc = get_prompt_creative_job_any(job_id)
+    if not doc:
+        _log.warning("SVGs received for unknown prompt creative job %s", job_id)
+        return False
+    if doc.get("svg_status") == PromptCreativeSvgStatus.READY.value:
+        return True  # already stored (n8n retried the callback)
+
+    photo_uris = _photo_data_uris(photos)
+    svg_files: List[dict] = []
+    for item in svgs if isinstance(svgs, list) else []:
+        if not isinstance(item, dict):
+            continue
+        version, variant = str(item.get("version") or ""), str(item.get("variant") or "")
+        if not re.fullmatch(r"v\d{1,2}", version) or variant not in SVG_VARIANTS or not item.get("data"):
+            continue
+        try:
+            svg_bytes = base64.b64decode(item["data"])
+            if SVG_PHOTO_TOKEN in svg_bytes:
+                if version not in photo_uris:
+                    _log.warning("No photo sent for %s/%s SVG of prompt creative job %s — skipped", version, variant, job_id)
+                    continue
+                svg_bytes = svg_bytes.replace(SVG_PHOTO_TOKEN, photo_uris[version])
+            url = upload_bytes_to_gcs(
+                svg_bytes, f"prompt_creative_jobs/{job_id}/{version}-{variant}.svg", "image/svg+xml"
+            )
+        except Exception as exc:
+            _log.error("Could not store %s/%s SVG for prompt creative job %s: %s", version, variant, job_id, exc)
+            continue
+        svg_files.append({
+            "version":   version,
+            "variant":   variant,
+            "file_name": str(item.get("file_name") or f"{version}-{variant}.svg"),
+            "url":       url,
+        })
+
+    if not svg_files:
+        return False
+    set_prompt_creative_job_svgs(job_id, svg_files)
+    _log.info("Prompt creative job %s — %d SVG file(s) stored", job_id, len(svg_files))
     return True
 
 
@@ -163,8 +277,8 @@ def _store_results(job_id: str, images: Any) -> bool:
 def _process(job_id: str, prompt: str, aspect_ratio: str, callback_url: str) -> None:
     """
     Runs in FastAPI's thread pool — response has already been sent.
-    POSTs the prompt to n8n. The webhook normally acks immediately and calls back later;
-    if it instead answers with the images, they are stored straight away.
+    POSTs the prompt to n8n. The workflow answers with the results (or {status: "error"}) when it
+    finishes; if that takes longer than the timeout or a proxy cuts it off, the callback delivers them.
     """
     if not settings.N8N_PROMPT_CREATIVE_WEBHOOK_URL:
         _log.warning("N8N_PROMPT_CREATIVE_WEBHOOK_URL not configured; job %s failed", job_id)
@@ -227,8 +341,12 @@ def _process(job_id: str, prompt: str, aspect_ratio: str, callback_url: str) -> 
             body = resp.json()
         except ValueError:
             body = None
+        # The workflow answers {status: "error", message} when a step stops the run (e.g. no offer in the brief)
+        if isinstance(body, dict) and body.get("status") == "error":
+            set_prompt_creative_job_failed(job_id, str(body.get("message") or "Creative generation failed."))
+            return
         if isinstance(body, dict) and body.get("images"):
-            _store_results(job_id, body["images"])
+            _store_results(job_id, body["images"], body.get("svgs"), body.get("photos"))
             return
 
         _log.info("n8n ack for prompt creative job %s (HTTP %s) — marking processing", job_id, resp.status_code)
@@ -294,7 +412,15 @@ async def prompt_creative_job_complete(job_id: str, request: Request):
     Expected JSON body:
     {
       "callback_secret": "<secret>",
-      "images": [{"data": "<base64>", "content_type": "image/png"}, ...]
+      "images": [{"data": "<base64>", "content_type": "image/png"}, ...],
+      "svgs":   [{"version": "v1", "variant": "outlined", "file_name": "...", "data": "<base64>"}, ...],
+      "photos": [{"version": "v1", "content_type": "image/png", "data": "<base64>"}, ...]
+    }
+    or, from older workflow versions, the SVGs on their own after the PNG callback:
+    {
+      "callback_secret": "<secret>",
+      "status": "svg_generated",
+      "svgs": [{"version": "v1", "variant": "editable", "file_name": "...", "data": "<base64>"}, ...]
     }
     """
     body = await request.json()
@@ -305,11 +431,20 @@ async def prompt_creative_job_complete(job_id: str, request: Request):
         raise HTTPException(status_code=403, detail="Invalid callback secret")
 
     if body.get("status") == "error":
-        set_prompt_creative_job_failed(job_id, str(body.get("message") or "Creative generation failed."))
+        doc = get_prompt_creative_job_any(job_id)
+        if doc and doc.get("status") != "completed":  # never undo results that already landed
+            set_prompt_creative_job_failed(job_id, str(body.get("message") or "Creative generation failed."))
         return {"ok": False}
 
     import asyncio
-    ok = await asyncio.get_event_loop().run_in_executor(None, _store_results, job_id, body.get("images"))
+    if body.get("status") == "svg_generated":
+        ok = await asyncio.get_event_loop().run_in_executor(
+            None, _store_svgs, job_id, body.get("svgs"), body.get("photos")
+        )
+        return {"ok": ok}
+    ok = await asyncio.get_event_loop().run_in_executor(
+        None, _store_results, job_id, body.get("images"), body.get("svgs"), body.get("photos")
+    )
     return {"ok": ok}
 
 
@@ -328,13 +463,19 @@ async def list_prompt_creative_jobs_endpoint(
 async def download_prompt_creative_result(
     job_id: str,
     image_index: int,
+    format: str = "png",
     current_user: dict = Depends(get_current_user),
 ):
-    """Proxy-download a result image from GCS so the browser saves it instead of opening it."""
+    """
+    Proxy-download a result from GCS so the browser saves it instead of opening it.
+    format = png (default) | editable | outlined | overlay  (the last three are SVG exports)
+    """
     import requests as _req
     from fastapi.responses import StreamingResponse
 
     _check_access(current_user)
+    if format not in DOWNLOAD_FORMATS:
+        raise HTTPException(400, f"format must be one of {list(DOWNLOAD_FORMATS)}")
     doc = get_prompt_creative_job(job_id, current_user["email"])
     if not doc:
         raise HTTPException(404, "Job not found")
@@ -343,15 +484,31 @@ async def download_prompt_creative_result(
     if image_index < 0 or image_index >= len(result_urls):
         raise HTTPException(404, "Image index out of range")
 
+    if format == "png":
+        url = result_urls[image_index]
+    else:
+        version = f"v{image_index + 1}"
+        url = next(
+            (f.get("url") for f in (doc.get("svg_files") or [])
+             if f.get("version") == version and f.get("variant") == format),
+            None,
+        )
+        if not url:
+            raise HTTPException(404, "SVG is not available for this variant")
+
     try:
-        r = _req.get(result_urls[image_index], timeout=60, stream=True)
+        r = _req.get(url, timeout=60, stream=True)
         r.raise_for_status()
     except Exception as exc:
         raise HTTPException(502, f"Could not fetch image from storage: {exc}")
 
     ct = r.headers.get("content-type", "image/png").split(";")[0].strip()
-    ext = ct.split("/")[-1] or "png"
-    filename = f"prompt_creative_{job_id[:8]}_v{image_index + 1}.{ext}"
+    if format == "png":
+        ext = ct.split("/")[-1] or "png"
+        filename = f"prompt_creative_{job_id[:8]}_v{image_index + 1}.{ext}"
+    else:
+        ct = "image/svg+xml"
+        filename = f"prompt_creative_{job_id[:8]}_v{image_index + 1}_{format}.svg"
 
     def _stream():
         for chunk in r.iter_content(chunk_size=8192):

@@ -17,6 +17,12 @@ class PromptCreativeJobStatus(str, Enum):
     FAILED = "failed"
 
 
+class PromptCreativeSvgStatus(str, Enum):
+    PENDING = "pending"          # PNGs stored, SVG files not collected yet
+    READY = "ready"
+    UNAVAILABLE = "unavailable"  # SVG callback never arrived (or job predates SVG support)
+
+
 def _now_iso() -> str:
     return datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
 
@@ -39,6 +45,10 @@ def create_prompt_creative_job_record(
         "aspect_ratio": aspect_ratio,
         "result_urls": [],
         "error": None,
+        # SVG exports, delivered by a second callback after the PNGs: [{"version", "variant", "file_name", "url"}]
+        "svg_status": PromptCreativeSvgStatus.PENDING.value,
+        "svg_files": [],
+        "svg_error": None,
     }
     prompt_creative_jobs_collection.insert_one(doc)
     return job_id
@@ -55,6 +65,27 @@ def set_prompt_creative_job_completed(job_id: str, result_urls: List[str]) -> No
                 "error": None,
             }
         },
+    )
+
+
+def set_prompt_creative_job_svgs(job_id: str, svg_files: List[Dict[str, Any]]) -> None:
+    prompt_creative_jobs_collection.update_one(
+        {"_id": job_id},
+        {
+            "$set": {
+                "svg_status": PromptCreativeSvgStatus.READY.value,
+                "svg_files": svg_files,
+                "svg_error": None,
+            }
+        },
+    )
+
+
+def set_prompt_creative_job_svg_unavailable(job_id: str, error: str) -> None:
+    """Only downgrades a pending lookup — never overwrites SVGs that already arrived."""
+    prompt_creative_jobs_collection.update_one(
+        {"_id": job_id, "svg_status": {"$ne": PromptCreativeSvgStatus.READY.value}},
+        {"$set": {"svg_status": PromptCreativeSvgStatus.UNAVAILABLE.value, "svg_error": error}},
     )
 
 
