@@ -105,6 +105,9 @@ class Settings:
     N8N_PROMPT_CREATIVE_AUTH_VALUE: str = os.getenv("N8N_PROMPT_CREATIVE_AUTH_VALUE", "")
     # Jobs still processing after this many minutes are marked failed (n8n errored without calling back)
     PROMPT_CREATIVE_TIMEOUT_MINUTES: int = int(os.getenv("PROMPT_CREATIVE_TIMEOUT_MINUTES", "15"))
+    # Only for older workflow versions that send SVGs in a second callback after the PNGs: if none
+    # arrives within this many minutes of completion the job reports svg_status = unavailable
+    PROMPT_CREATIVE_SVG_TIMEOUT_MINUTES: int = int(os.getenv("PROMPT_CREATIVE_SVG_TIMEOUT_MINUTES", "10"))
     # Max output file size hint passed to the n8n resize workflow (in KB)
     N8N_RESIZE_MAX_SIZE_KB: int = int(os.getenv("N8N_RESIZE_MAX_SIZE_KB", "999000"))
 
